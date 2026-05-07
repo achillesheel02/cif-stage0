@@ -29,6 +29,12 @@ pub struct Snapshot {
     pub accuracy_o: f64,
     pub xi_other: f64,
     pub self_accuracy: f64,
+    pub accuracy_s: f64,
+    pub xi_self: f64,
+    pub best_path_accuracy: f64,
+    pub xi_reflexive: f64,
+    pub self_unique_tuples: usize,
+    pub self_consolidation: f64,
 }
 
 /// A strand checkpoint — dual-path convergence across actions.
@@ -78,11 +84,24 @@ impl Metrics {
             confidence: agent.avg_prediction_confidence(),
             accuracy_o: agent.path_o_accuracy(),
             xi_other: agent.other_advantage(),
-            self_accuracy: 0.0, // Computed in main loop, not here
+            self_accuracy: 0.0,
+            accuracy_s: agent.path_s_accuracy(),
+            xi_self: agent.self_advantage(),
+            best_path_accuracy: agent.best_path_accuracy(),
+            xi_reflexive: agent.reflexive_advantage(),
+            self_unique_tuples: agent.self_unique_count(),
+            self_consolidation: agent.self_consolidation_ratio(),
         };
 
         if !self.header_printed {
-            if agent.config.other_policy != OtherPolicy::None {
+            if agent.config.self_model_enabled {
+                println!(
+                    "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                    "episode", "acc_S", "acc_A", "acc_B", "xi_self", "xi_refl", "best_acc",
+                    "consol_S", "consol_A", "entropy", "frobenius", "gap"
+                );
+                println!("{}", "-".repeat(120));
+            } else if agent.config.other_policy != OtherPolicy::None {
                 println!(
                     "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
                     "episode", "acc_A", "acc_B", "acc_O", "acc_Ofrq", "xi_other", "xi_mem",
@@ -122,7 +141,23 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        if agent.config.other_policy != OtherPolicy::None {
+        if agent.config.self_model_enabled {
+            println!(
+                "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+                snap.episode,
+                snap.accuracy_s,
+                snap.accuracy,
+                agent.path_b_accuracy(),
+                snap.xi_self,
+                snap.xi_reflexive,
+                snap.best_path_accuracy,
+                snap.self_consolidation,
+                snap.consolidation,
+                snap.entropy,
+                frob_str,
+                gap_str,
+            );
+        } else if agent.config.other_policy != OtherPolicy::None {
             println!(
                 "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
                 snap.episode,
@@ -230,7 +265,9 @@ impl Metrics {
 
     /// Print a summary at the end of the run.
     pub fn summary(&self, agent: &Stage0Agent) {
-        let stage_label = if agent.config.other_policy != OtherPolicy::None {
+        let stage_label = if agent.config.self_model_enabled {
+            "STAGE 5 SUMMARY"
+        } else if agent.config.other_policy != OtherPolicy::None {
             "STAGE 4 SUMMARY"
         } else if agent.config.rules_enabled {
             "STAGE 3 SUMMARY"
@@ -329,6 +366,32 @@ impl Metrics {
             println!(
                 "Other observations:    {}",
                 agent.other_observation_count()
+            );
+        }
+        if agent.config.self_model_enabled {
+            println!(
+                "Path S accuracy:       {:.3}",
+                agent.path_s_accuracy()
+            );
+            println!(
+                "Xi self (S-A):         {:.3}",
+                agent.self_advantage()
+            );
+            println!(
+                "Best-path accuracy:    {:.3}",
+                agent.best_path_accuracy()
+            );
+            println!(
+                "Xi reflexive (best-A): {:.3}",
+                agent.reflexive_advantage()
+            );
+            println!(
+                "Self-memory tuples:    {}",
+                agent.self_unique_count()
+            );
+            println!(
+                "Self-memory consol:    {:.3}",
+                agent.self_consolidation_ratio()
             );
         }
         println!(
@@ -459,6 +522,28 @@ impl Metrics {
             }
             if acc < 0.5 && agent.config.noise == 0.0 && !agent.config.drift_enabled {
                 println!("  SELF-MODEL DEGRADED — B's presence fragments memory.");
+            }
+        }
+
+        // Self-model diagnosis
+        if agent.config.self_model_enabled {
+            let xi_s = agent.self_advantage();
+            let acc_s = agent.path_s_accuracy();
+            if xi_s > 0.05 {
+                println!("  SELF-MODEL EFFECTIVE — Xi_self={:.3}, factored memory outperforms full grid.", xi_s);
+            }
+            let xi_r = agent.reflexive_advantage();
+            if xi_r > 0.05 {
+                println!("  REFLEXIVE SELECTION EFFECTIVE — Xi_reflexive={:.3}, path selection outperforms fixed Path A.", xi_r);
+            }
+            let self_tup = agent.self_unique_count();
+            let full_tup = agent.memory.unique_count();
+            if full_tup > 0 && self_tup < full_tup / 2 {
+                println!("  SELF-MEMORY COMPRESSES — {} tuples vs {} full ({:.0}x reduction).",
+                    self_tup, full_tup, full_tup as f64 / self_tup.max(1) as f64);
+            }
+            if acc_s > 0.8 && acc < 0.3 {
+                println!("  SELF-MODEL RECOVERS — factored out other agent's noise (acc_S={:.3} vs acc_A={:.3}).", acc_s, acc);
             }
         }
 

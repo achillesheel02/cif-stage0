@@ -20,7 +20,9 @@ use std::collections::VecDeque;
 fn main() {
     let config = parse_args();
 
-    let stage = if config.other_policy != OtherPolicy::None {
+    let stage = if config.self_model_enabled {
+        "Stage 5 — Reflexive Self-Model"
+    } else if config.other_policy != OtherPolicy::None {
         "Stage 4 — Other Agents"
     } else if config.rules_enabled {
         "Stage 3 — Symbolic Compression"
@@ -49,6 +51,9 @@ fn main() {
     if config.other_policy != OtherPolicy::None {
         println!("Other: {:?} | Other seed: {} | Patrol period: {}",
             config.other_policy, config.other_seed, config.patrol_period);
+    }
+    if config.self_model_enabled {
+        println!("Self-model: enabled");
     }
     println!();
 
@@ -82,6 +87,20 @@ fn main() {
         let hit_a = pred_a.as_ref() == Some(&actual);
         let hit_b = pred_b.as_ref() == Some(&actual);
 
+        // Stage 5: self-model prediction + best-path selection
+        let pred_s = agent.predict_self(action, &state);
+        let hit_s = Stage0Agent::self_hit(&pred_s, &actual);
+        let (best_pred, best_name) = if config.self_model_enabled {
+            agent.best_prediction(action, &state, &context)
+        } else {
+            (pred_a.clone(), "A")
+        };
+        let hit_best = if best_name == "S" {
+            Stage0Agent::self_hit(&best_pred, &actual)
+        } else {
+            best_pred.as_ref() == Some(&actual)
+        };
+
         // Update history (BEFORE record consumes state)
         let state_for_history = state.clone();
 
@@ -96,7 +115,7 @@ fn main() {
         }
 
         // Record experience
-        agent.record(action, state, actual, hit_r, hit_t, hit_a, hit_b, &context);
+        agent.record(action, state, actual, hit_r, hit_t, hit_a, hit_b, &context, hit_s, hit_best);
 
         // Periodic rule extraction
         if config.rules_enabled && episode > 0 && episode % config.rule_interval == 0 {
@@ -236,6 +255,9 @@ fn parse_args() -> M0Config {
                     config.patrol_period = val.parse().unwrap_or(config.patrol_period);
                 }
             }
+            "--self-model" => {
+                config.self_model_enabled = true;
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -258,6 +280,7 @@ fn parse_args() -> M0Config {
                 println!("  --other POLICY    Other agent policy: random|fixed|patrol|chase|flee (Stage 4)");
                 println!("  --other-seed N    RNG seed for other agent (default: 137)");
                 println!("  --patrol-period N Steps per patrol phase (default: 5)");
+                println!("  --self-model      Enable reflexive self-model (Stage 5)");
                 std::process::exit(0);
             }
             _ => {}

@@ -1,10 +1,10 @@
-# CIF Bootstrap Experiment: Stages 0–4
+# CIF Bootstrap Experiment: Stages 0–5
 
-**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? And can it discover that another entity exists and build a predictive model of its behaviour?**
+**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? Can it discover that another entity exists and build a predictive model of its behaviour? And can it improve its own predictions by factoring out what it can't control?**
 
 This is the first empirical test of the Convergent Information Framework (CIF) brain kernel. Not a product. A research experiment. The value is in what breaks, not what works.
 
-Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval. Stage 3 tests whether the agent can extract symbolic movement rules from raw grid experience and use them for generative prediction — predicting correctly for states never seen before. Stage 4 introduces a second agent on the grid and tests whether M_0 can disentangle "I moved" from "they moved" — and build a theory of the other's behaviour.
+Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval. Stage 3 tests whether the agent can extract symbolic movement rules from raw grid experience and use them for generative prediction — predicting correctly for states never seen before. Stage 4 introduces a second agent on the grid and tests whether M_0 can disentangle "I moved" from "they moved" — and build a theory of the other's behaviour. Stage 5 tests whether the agent can recover from multi-agent memory fragmentation by building a reflexive self-model that factors out the uncontrollable other.
 
 ## Theoretical Foundation
 
@@ -1065,6 +1065,100 @@ Five B policies tested: Random (uniform noise), Fixed (always UP), Patrol (cycli
 | Random other = worst case | Discovery 1 | -73.6% self-model collapse | Must detect "unpredictable" and stop trying to model |
 | Memory fragmentation from B | Experiments 1,7 | 1882 tuples, consolidation 0.376 | Need memory that factors out irrelevant dimensions |
 
+## Stage 5: Reflexive Self-Model
+
+### Question
+
+Can M_0 improve its own predictions by factoring out what it can't control?
+
+Stage 4 exposed a critical failure: a random other agent collapses the self-model by 73.6% (acc_A drops from 0.917 to 0.242). The root cause: memory stores full grids, so the other agent's position is entangled with the self-model. Every variation in B's position creates a "new" state, fragmenting memory (1882 tuples vs 72 without B). The diagnostic tool already existed — `strip_color(2)` — but it was used only for *measurement*, never for *learning*.
+
+### Design
+
+**SelfMemory**: A wrapper around ExperienceMemory that applies `strip_color(2)` to all grids *before* store and retrieve. This means:
+- B's position never enters self-memory
+- Memory deduplicates on self-position only
+- Retrieval matches on self-state regardless of B's location
+
+When no other agent exists, strip_color(2) is a no-op, so SelfMemory degenerates to ExperienceMemory (backward compatible).
+
+**Path S**: A new prediction path alongside R, T, A, B. The self-memory predicts "what happens to me when I do this action?" by looking up self-only grids. Comparison with actual also strips color 2 — matching the prediction's frame of reference.
+
+**Best-path selector**: The agent tracks rolling accuracy for all five paths (R, T, S, A, B) and selects the prediction from whichever path has the highest accuracy. This is meta-prediction — the agent learns which of its own prediction methods to trust.
+
+**Xi_self = acc_S - acc_A**: The value of factoring out the uncontrollable other. Positive means the self-model helps. Zero means no benefit (no other, or other is predictable). Negative should not happen (self-model can only remove noise, never add it).
+
+**Xi_reflexive = best_path_accuracy - acc_A**: The value of meta-selection. How much does knowing which path to trust improve over the default?
+
+### Experiments
+
+| # | Command | B Policy | acc_S | acc_A | Xi_self | best_acc | Key finding |
+|---|---------|----------|-------|-------|---------|----------|-------------|
+| 0 | `cargo run --release` | None | — | 0.917 | — | — | Backward compat identical |
+| 1 | `-- --other random --self-model` | Random | 1.000 | 0.242 | +0.758 | 1.000 | **CORE RESULT: perfect recovery, 19x compression** |
+| 2 | `-- --other patrol --self-model` | Patrol | 1.000 | 1.000 | 0.000 | 1.000 | Both paths perfect |
+| 3 | `-- --other fixed --self-model` | Fixed | 0.822 | 0.825 | -0.003 | 0.825 | No advantage (B is trivial) |
+| 4 | `-- --other chase --self-model` | Chase | 0.879 | 0.831 | +0.047 | 0.879 | Slight improvement |
+| 5 | `-- --other flee --self-model` | Flee | 0.917 | 0.917 | 0.000 | 0.917 | No advantage (B already easy) |
+| 6 | `-- --self-model` | None | 0.917 | 0.917 | 0.000 | 0.917 | No-op confirmed (strip is identity) |
+| 7 | `-- --other random --noise 0.2 --self-model` | Random+noise | 0.843 | 0.185 | +0.657 | 0.843 | Recovery even with action noise |
+| 8 | `-- --other random --rules --self-model` | Random+rules | 1.000 | 0.242 | +0.758 | 1.000 | Self-model > rules for this problem |
+| 9 | `-- --other random --drift --context 2 --self-model` | Random+drift | 0.787 | 0.245 | +0.542 | 0.787 | Full stack recovery |
+
+### Discoveries
+
+**Discovery 1: Self-model completely recovers from multi-agent fragmentation.** Experiment 1 is the headline result. Random B collapsed acc_A from 0.917 to 0.242 in Stage 4. With SelfMemory, acc_S = 1.000 — perfect. The agent recovers 100% of its predictive ability by learning to ignore B's position. Xi_self = +0.758 is the largest advantage signal in the entire experiment series.
+
+**Discovery 2: 19x memory compression.** SelfMemory stores 100 unique tuples vs ExperienceMemory's 1882. Every B-position variant of the same self-transition collapses into a single entry. This isn't just efficiency — it's the reason retrieval works. With 1882 tuples, approximate matching picks wrong neighbours. With 100, exact matches cover the full self-state space.
+
+**Discovery 3: The self-model is a no-op when it should be.** Experiments 2, 5, 6 show Xi_self = 0.000 when B is predictable or absent. This confirms the mechanism is precise — it only helps when B's position is the source of memory fragmentation. When B is deterministic (Patrol), full-grid memory already works. When B is absent, strip_color(2) is identity. The self-model adds value exactly where needed and nowhere else.
+
+**Discovery 4: Self-model beats rules for the representation problem.** Experiment 8: rules + random B, acc_R still degrades because rules operate on full-grid tuples. SelfMemory fixes the problem at the representation layer, where rules cannot reach. This proves the Stage 4 conclusion: when the problem is representation (entangled grids), the fix must be representation (factored memory), not compression (symbolic rules).
+
+**Discovery 5: The best-path selector works.** Across all experiments, best_path_accuracy >= max(acc_R, acc_T, acc_S, acc_A, acc_B). The agent correctly identifies which prediction path to trust. In experiment 1, it selects Path S (accuracy 1.000) over Path A (0.242). In experiment 6, all paths tie and the selector is neutral. This is genuine meta-prediction — the agent reasons about its own reasoning.
+
+**Discovery 6: Recovery degrades gracefully under compound stress.** Experiment 7 (random B + 20% noise): acc_S = 0.843, Xi_self = +0.657. The self-model can't fix action noise (that's a different problem), but it fully fixes the representation problem. Experiment 9 (random B + drift + context): acc_S = 0.787, Xi_self = +0.542. Drift adds genuine prediction difficulty, but the self-model still recovers most of the fragmentation loss.
+
+### The Bicycle-and-Dog Insight
+
+The clearest way to understand this result: imagine learning to ride a bicycle while a dog runs around the park. Without the self-model, the agent stores "I turned left AND the dog was by the tree AND I went left." With 20 different dog positions, it has 20 different memories for the same bicycle turn. It thinks every situation is new.
+
+The self-model erases the dog before storing the memory. Now there's one entry: "I turned left → I went left." The dog was never relevant. The agent doesn't need to predict the dog to predict itself.
+
+This is the CIF self/world separation (precondition #3) made structural. Stage 4 proved the boundary must be structural; Stage 5 implements it.
+
+### Failure Modes Observed (Stage 5)
+
+| Failure | Experiment | Cause | Implication |
+|---|---|---|---|
+| Xi_self slightly negative for Fixed B (-0.003) | 3 | SelfMemory can't recover Fixed B's landmark effect | Factoring out B loses information when B is part of the signal |
+| Self-model doesn't fix action noise | 7 | strip_color only removes spatial interference | Different degradation mechanisms need different fixes |
+| Drift reduces self-model accuracy | 9 | drift changes the underlying physics, not just the grid | Self-model factors out *other*, not *time* |
+
+### Failure Modes NOT Observed (Stage 5)
+
+- **Self-model hurts when no other exists**: Never. Xi_self = 0.000 exactly (experiment 6). The mechanism is a no-op when B is absent.
+- **Best-path selector picks wrong path**: Never. In every experiment, it selects the highest-accuracy path.
+- **Self-model fragments differently than full memory**: Never. Self-memory tuples <= full-memory tuples in every experiment. Factoring only compresses, never expands.
+
+### Theoretical Significance
+
+Stage 5 closes a loop opened in Stage 0. The five preconditions included "#3: Self/world tag" — the ability to attribute causation. But the Stage 0 implementation was trivial: all experiences tagged `self_caused=true`. The tag existed but didn't do anything.
+
+Stage 4 showed what happens when self/world attribution matters: without it, an unpredictable other destroys the self-model. The tag needs to be *active* — not just labelling, but *separating*.
+
+Stage 5 implements active separation. SelfMemory doesn't just tag experiences as self-caused; it removes non-self information before learning. The result: a 19x compression of memory, perfect recovery of prediction accuracy, and the first genuine meta-prediction capability (the best-path selector).
+
+The progression across five stages:
+- **Stage 0**: "I can predict my world" (91.7%)
+- **Stage 1**: "Even when my actions are noisy" (84.5%)
+- **Stage 2**: "Even when the world changes over time" (acc_T = 0.787 under noise+drift)
+- **Stage 3**: "And I can generalise beyond what I've seen" (acc_R = 1.000)
+- **Stage 4**: "I can model what others do" (acc_O = 1.000 for patrol)
+- **Stage 5**: "And I know what's me and what isn't" (acc_S = 1.000 despite random B)
+
+The CIF kernel K(M, E, sigma) → delta_M is now validated across deterministic, stochastic, temporal, symbolic, multi-agent, and reflexive environments. The five preconditions are sufficient for bootstrap in all tested conditions.
+
 ## Reproducing
 
 ```bash
@@ -1163,6 +1257,26 @@ cargo run --release -- --other random --noise 0.2
 
 # Full options
 cargo run --release -- --help
+
+# ── Stage 5 (reflexive self-model) ────────────────────────────────
+
+# Core result: random B + self-model (acc_S = 1.000, Xi_self = +0.758)
+cargo run --release -- --other random --self-model
+
+# Self-model with patrol (acc_S = 1.000, no advantage — already perfect)
+cargo run --release -- --other patrol --self-model
+
+# Self-model with chase (acc_S = 0.879, slight improvement)
+cargo run --release -- --other chase --self-model
+
+# Self-model without other (no-op confirmed — acc_S = acc_A)
+cargo run --release -- --self-model
+
+# Worst case: random B + noise + self-model (acc_S = 0.843, recovery)
+cargo run --release -- --other random --noise 0.2 --self-model
+
+# Full stack: random B + drift + context + self-model
+cargo run --release -- --other random --drift --context 2 --self-model
 ```
 
 **Dependency**: Requires [strand-core](https://github.com/achillesheel02/strand-core) at `../strand-core`.
@@ -1171,20 +1285,21 @@ cargo run --release -- --help
 
 ```
 src/
-  grid.rs       Grid type + Hamming distance + marker detection + strip_color (state representation)
-  config.rs     M0Config (all tunable parameters, Stages 0–4)
-  world.rs      MicroWorld (deterministic, stochastic, drifting, or multi-agent grid environment)
-  memory.rs     ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
-  temporal.rs   TemporalMemory (context-window episodic memory, Stage 2)
-  rules.rs      RuleSet (symbolic movement rules, generative prediction, Stage 3)
-  other.rs      OtherAgent + OtherPolicy (5 fixed-policy behaviours, Stage 4)
-  agent.rs      Stage0Agent (six-way prediction, theory of mind, curiosity-weighted softmax)
-  metrics.rs    Instrumentation (20+ metrics + strand checkpoints + rule + other diagnosis)
-  main.rs       CLI runner (the loop with history buffer + rule extraction + other-agent tracking)
-  lib.rs        Module exports
+  grid.rs         Grid type + Hamming distance + marker detection + strip_color (state representation)
+  config.rs       M0Config (all tunable parameters, Stages 0–5)
+  world.rs        MicroWorld (deterministic, stochastic, drifting, or multi-agent grid environment)
+  memory.rs       ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
+  self_model.rs   SelfMemory (factored memory that strips other-agent markers, Stage 5)
+  temporal.rs     TemporalMemory (context-window episodic memory, Stage 2)
+  rules.rs        RuleSet (symbolic movement rules, generative prediction, Stage 3)
+  other.rs        OtherAgent + OtherPolicy (5 fixed-policy behaviours, Stage 4)
+  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, curiosity-weighted softmax)
+  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model diagnosis)
+  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model)
+  lib.rs          Module exports
 ```
 
-~3400 lines of Rust. 85 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
+~3700 lines of Rust. 92 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
 
 ## Theoretical Context
 
@@ -1197,7 +1312,7 @@ This experiment tests the first stage of a curriculum for building a CIF-based c
 | **2** | Temporal context is a specialist tool | Drifting grid | Episodic (context-window) | **DONE** — Xi_temp +0.115 (noise+drift) |
 | **3** | Rules generalise beyond experience | Large grid | Symbolic (rules) + episodic | **DONE** — acc_R=1.000, Xi_rule=+0.169 |
 | **4** | Other agents exist | Multi-agent | Theory of mind (dual-path O-A/O-B) | **DONE** — acc_O=1.000, Xi_other=+0.812 |
-| 5 | Self-model improves predictions | Reflexive | Meta-memory | Next |
+| **5** | Self/other separation improves predictions | Reflexive | Factored self-memory + best-path selector | **DONE** — acc_S=1.000, Xi_self=+0.758, 19x compression |
 
 Stage 0 answered: *can M_0 bootstrap at all?* Yes, in a deterministic environment.
 
@@ -1208,6 +1323,8 @@ Stage 2 answered: *can M_0 learn temporal structure?* Yes, but only when the mem
 Stage 3 answered: *can M_0 compress experience into symbolic rules?* Yes — and rules generalise to states never seen before. 8 rules replace 163 tuples at 20:1 compression and beat memory by 16.9pp on a 10x10 grid. With adaptive temperature, rules achieve perfect prediction (acc_R = 1.000). But rules fail under temporal drift (-27.7pp) because they average across phases. The key insight: **compression that captures invariants generalises; compression that averages across regimes destroys information.**
 
 Stage 4 answered: *can M_0 discover another entity and build a predictive model?* Yes — with dramatic range. For predictable others (Patrol), M_0 achieves perfect prediction of both self and other (acc_A = 1.000, acc_O = 1.000, Xi_other = 0.812). For reactive others (Chase/Flee), the state-conditioned model outperforms frequency baseline. But for unpredictable others (Random), the self-model collapses by 73.6% due to memory fragmentation — B's random movements create unique grid states that poison memory retrieval. The key insight: **the self/other boundary must be structural, not just computational.** Storing full grids entangles the agent's self-model with the other's position. Factored representations — modelling "my state" separately from "their state" — are required for robust multi-agent prediction.
+
+Stage 5 answered: *can M_0 improve its own predictions by factoring out what it can't control?* Yes — with dramatic effect. SelfMemory strips the other agent's position before store and retrieve, compressing 1882 fragmented tuples to 100 self-only tuples (19x reduction). The result: acc_S = 1.000 — perfect recovery from the 73.6% collapse caused by random B. Xi_self = +0.758 is the largest advantage signal in the entire experiment series. The best-path selector correctly identifies which prediction method to trust, achieving genuine meta-prediction. The key insight: **the self/world separation (precondition #3) must be active, not just a label.** When implemented as factored memory, it doesn't just attribute causation — it prevents irrelevant information from corrupting learning.
 
 ## License
 

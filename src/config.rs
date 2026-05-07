@@ -51,6 +51,8 @@ pub struct M0Config {
     pub other_seed: u64,
     /// Steps per direction for Patrol policy.
     pub patrol_period: u64,
+    /// Enable reflexive self-model (Stage 5).
+    pub self_model_enabled: bool,
 }
 
 impl Default for M0Config {
@@ -78,6 +80,7 @@ impl Default for M0Config {
             other_policy: OtherPolicy::None,
             other_seed: 137,
             patrol_period: 5,
+            self_model_enabled: false,
         }
     }
 }
