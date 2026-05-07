@@ -39,6 +39,10 @@ pub struct M0Config {
     pub drift_period: u64,
     /// Temporal context window size K. 0 = no temporal memory (Stage 0/1 compat).
     pub context_len: usize,
+    /// Enable rule extraction (Stage 3).
+    pub rules_enabled: bool,
+    /// Re-extract rules every N episodes.
+    pub rule_interval: u64,
 }
 
 impl Default for M0Config {
@@ -61,6 +65,8 @@ impl Default for M0Config {
             drift_enabled: false,
             drift_period: 10,
             context_len: 0,
+            rules_enabled: false,
+            rule_interval: 100,
         }
     }
 }

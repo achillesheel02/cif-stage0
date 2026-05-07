@@ -19,7 +19,9 @@ use std::collections::VecDeque;
 fn main() {
     let config = parse_args();
 
-    let stage = if config.drift_enabled || config.context_len > 0 {
+    let stage = if config.rules_enabled {
+        "Stage 3 — Symbolic Compression"
+    } else if config.drift_enabled || config.context_len > 0 {
         "Stage 2 — Temporal Bootstrap"
     } else if config.noise > 0.0 || config.curiosity_weight > 0.0 || config.adaptive_temperature {
         "Stage 1 — Stochastic Bootstrap"
@@ -38,6 +40,9 @@ fn main() {
         println!("Drift: {} | Drift period: {} | Context K: {}",
             config.drift_enabled, config.drift_period, config.context_len);
     }
+    if config.rules_enabled {
+        println!("Rules: enabled | Rule interval: {}", config.rule_interval);
+    }
     println!();
 
     let mut world = MicroWorld::with_drift(
@@ -53,7 +58,8 @@ fn main() {
         let context: Vec<(u8, Grid)> = history.iter().cloned().collect();
         let action = agent.select_action(&state, &context);
 
-        // Three-way predictions BEFORE observing outcome
+        // Four-way predictions BEFORE observing outcome
+        let pred_r = agent.predict_rule(action, &state);
         let pred_t = agent.predict_temporal(action, &state, &context);
         let pred_a = agent.predict_path_a(action, &state);
         let pred_b = agent.predict_path_b(action);
@@ -63,6 +69,7 @@ fn main() {
         let actual = world.observe();
 
         // Score predictions
+        let hit_r = pred_r.as_ref() == Some(&actual);
         let hit_t = pred_t.as_ref() == Some(&actual);
         let hit_a = pred_a.as_ref() == Some(&actual);
         let hit_b = pred_b.as_ref() == Some(&actual);
@@ -71,7 +78,12 @@ fn main() {
         let state_for_history = state.clone();
 
         // Record experience
-        agent.record(action, state, actual, hit_t, hit_a, hit_b, &context);
+        agent.record(action, state, actual, hit_r, hit_t, hit_a, hit_b, &context);
+
+        // Periodic rule extraction
+        if config.rules_enabled && episode > 0 && episode % config.rule_interval == 0 {
+            agent.extract_rules();
+        }
 
         // Maintain history buffer
         history.push_back((action, state_for_history));
@@ -172,6 +184,15 @@ fn parse_args() -> M0Config {
                     config.context_len = val.parse().unwrap_or(config.context_len);
                 }
             }
+            "--rules" => {
+                config.rules_enabled = true;
+            }
+            "--rule-interval" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.rule_interval = val.parse().unwrap_or(config.rule_interval);
+                }
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -189,6 +210,8 @@ fn parse_args() -> M0Config {
                 println!("  --drift           Enable hidden drift (Stage 2)");
                 println!("  --drift-period N  Steps per drift phase (default: 10, full cycle = 4N)");
                 println!("  --context K       Temporal context window size (default: 0)");
+                println!("  --rules           Enable rule extraction (Stage 3)");
+                println!("  --rule-interval N Re-extract rules every N episodes (default: 100)");
                 std::process::exit(0);
             }
             _ => {}

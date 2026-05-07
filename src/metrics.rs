@@ -10,16 +10,20 @@ use strand_core::{Config, StrandMatrix};
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub episode: u64,
+    pub accuracy_r: f64,
     pub accuracy_t: f64,
     pub accuracy: f64,
     pub consolidation: f64,
     pub entropy: f64,
     pub path_advantage: f64,
+    pub xi_rule: f64,
     pub xi_temporal: f64,
     pub xi_total: f64,
     pub temperature: f64,
     pub unique_tuples: usize,
     pub temporal_tuples: usize,
+    pub rule_count: usize,
+    pub rule_confidence: f64,
     pub confidence: f64,
 }
 
@@ -53,21 +57,32 @@ impl Metrics {
     pub fn emit(&mut self, episode: u64, agent: &Stage0Agent) {
         let snap = Snapshot {
             episode,
+            accuracy_r: agent.path_r_accuracy(),
             accuracy_t: agent.path_t_accuracy(),
             accuracy: agent.path_a_accuracy(),
             consolidation: agent.consolidation_ratio(),
             entropy: agent.action_entropy(),
             path_advantage: agent.path_advantage(),
+            xi_rule: agent.rule_advantage(),
             xi_temporal: agent.temporal_advantage(),
-            xi_total: agent.path_t_accuracy() - agent.path_b_accuracy(),
+            xi_total: agent.path_r_accuracy() - agent.path_b_accuracy(),
             temperature: agent.temperature(),
             unique_tuples: agent.memory.unique_count(),
             temporal_tuples: agent.temporal_memory.unique_count(),
+            rule_count: agent.rule_set.rule_count(),
+            rule_confidence: agent.rule_set.avg_confidence(),
             confidence: agent.avg_prediction_confidence(),
         };
 
         if !self.header_printed {
-            if agent.config.context_len > 0 {
+            if agent.config.rules_enabled {
+                println!(
+                    "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                    "episode", "acc_R", "acc_T", "acc_A", "acc_B", "xi_rule", "xi_temp", "xi_mem",
+                    "consol", "entropy", "temp", "frobenius", "gap"
+                );
+                println!("{}", "-".repeat(130));
+            } else if agent.config.context_len > 0 {
                 println!(
                     "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
                     "episode", "acc_T", "acc_A", "acc_B", "xi_temp", "xi_mem", "xi_tot",
@@ -93,7 +108,24 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        if agent.config.context_len > 0 {
+        if agent.config.rules_enabled {
+            println!(
+                "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+                snap.episode,
+                snap.accuracy_r,
+                snap.accuracy_t,
+                snap.accuracy,
+                agent.path_b_accuracy(),
+                snap.xi_rule,
+                snap.xi_temporal,
+                snap.path_advantage,
+                snap.consolidation,
+                snap.entropy,
+                snap.temperature,
+                frob_str,
+                gap_str,
+            );
+        } else if agent.config.context_len > 0 {
             println!(
                 "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
                 snap.episode,
@@ -169,7 +201,9 @@ impl Metrics {
 
     /// Print a summary at the end of the run.
     pub fn summary(&self, agent: &Stage0Agent) {
-        let stage_label = if agent.config.context_len > 0 || agent.config.drift_enabled {
+        let stage_label = if agent.config.rules_enabled {
+            "STAGE 3 SUMMARY"
+        } else if agent.config.context_len > 0 || agent.config.drift_enabled {
             "STAGE 2 SUMMARY"
         } else if agent.config.noise > 0.0 || agent.config.curiosity_weight > 0.0 || agent.config.adaptive_temperature {
             "STAGE 1 SUMMARY"
@@ -184,6 +218,12 @@ impl Metrics {
             agent.episode_count
         );
 
+        if agent.config.rules_enabled {
+            println!(
+                "Final Path R accuracy: {:.3}",
+                agent.path_r_accuracy()
+            );
+        }
         if agent.config.context_len > 0 {
             println!(
                 "Final Path T accuracy: {:.3}",
@@ -198,15 +238,30 @@ impl Metrics {
             "Final Path B accuracy: {:.3}",
             agent.path_b_accuracy()
         );
+        if agent.config.rules_enabled {
+            println!(
+                "Xi rule (R-A):         {:.3}",
+                agent.rule_advantage()
+            );
+        }
         if agent.config.context_len > 0 {
             println!(
                 "Xi temporal (T-A):     {:.3}",
                 agent.temporal_advantage()
             );
+        }
+        if agent.config.rules_enabled || agent.config.context_len > 0 {
             println!(
                 "Xi memory (A-B):       {:.3}",
                 agent.path_advantage()
             );
+        }
+        if agent.config.rules_enabled {
+            println!(
+                "Xi total (R-B):        {:.3}",
+                agent.path_r_accuracy() - agent.path_b_accuracy()
+            );
+        } else if agent.config.context_len > 0 {
             println!(
                 "Xi total (T-B):        {:.3}",
                 agent.path_t_accuracy() - agent.path_b_accuracy()
@@ -215,6 +270,16 @@ impl Metrics {
             println!(
                 "Path advantage:        {:.3}",
                 agent.path_advantage()
+            );
+        }
+        if agent.config.rules_enabled {
+            println!(
+                "Rules extracted:       {}",
+                agent.rule_set.rule_count()
+            );
+            println!(
+                "Rule confidence:       {:.3}",
+                agent.rule_set.avg_confidence()
             );
         }
         println!(
@@ -308,6 +373,24 @@ impl Metrics {
             }
             if !agent.config.drift_enabled && xi_t > 0.02 {
                 println!("  WARNING: false positive temporal signal (Xi_temporal={:.3}) in Markovian world.", xi_t);
+            }
+        }
+
+        // Rule diagnosis
+        if agent.config.rules_enabled {
+            let xi_r = agent.rule_advantage();
+            let acc_r = agent.path_r_accuracy();
+            if xi_r > 0.05 {
+                println!("  RULE COMPRESSION EFFECTIVE — Xi_rule={:.3}, rules outperform raw memory.", xi_r);
+            }
+            if acc_r > 0.95 && agent.config.noise == 0.0 {
+                println!("  SYMBOLIC COMPRESSION NEAR-OPTIMAL — acc_R={:.3} in deterministic world.", acc_r);
+            }
+            if agent.config.context_len > 0 && xi_r > agent.temporal_advantage() {
+                println!("  RULES OUTPERFORM TEMPORAL CONTEXT — Xi_rule={:.3} > Xi_temporal={:.3}.", xi_r, agent.temporal_advantage());
+            }
+            if agent.config.drift_enabled && xi_r < -0.05 {
+                println!("  RULES DEGRADE UNDER DRIFT — Xi_rule={:.3}. MLE delta corrupted by phase mixing.", xi_r);
             }
         }
 

@@ -66,6 +66,18 @@ impl Grid {
     pub fn size(&self) -> usize {
         self.width * self.height
     }
+
+    /// Find the marker (cell with value 1). Returns (row, col).
+    pub fn find_marker(&self) -> Option<(usize, usize)> {
+        for r in 0..self.height {
+            for c in 0..self.width {
+                if self.cells[r][c] == 1 {
+                    return Some((r, c));
+                }
+            }
+        }
+        None
+    }
 }
 
 impl std::fmt::Display for Grid {
@@ -115,6 +127,26 @@ mod tests {
         let a = Grid::filled(3, 3, 0);
         let b = Grid::filled(4, 4, 0);
         assert_eq!(a.hamming_distance(&b), usize::MAX);
+    }
+
+    #[test]
+    fn test_find_marker_center() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(2, 2, 1);
+        assert_eq!(g.find_marker(), Some((2, 2)));
+    }
+
+    #[test]
+    fn test_find_marker_corner() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(0, 4, 1);
+        assert_eq!(g.find_marker(), Some((0, 4)));
+    }
+
+    #[test]
+    fn test_find_marker_empty() {
+        let g = Grid::filled(5, 5, 0);
+        assert_eq!(g.find_marker(), None);
     }
 
     #[test]
