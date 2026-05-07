@@ -1,10 +1,10 @@
-# CIF Bootstrap Experiment: Stages 0–3
+# CIF Bootstrap Experiment: Stages 0–4
 
-**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? And can it compress raw experience into symbolic rules that generalise to unseen states?**
+**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? And can it discover that another entity exists and build a predictive model of its behaviour?**
 
 This is the first empirical test of the Convergent Information Framework (CIF) brain kernel. Not a product. A research experiment. The value is in what breaks, not what works.
 
-Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval. Stage 3 tests whether the agent can extract symbolic movement rules from raw grid experience and use them for generative prediction — predicting correctly for states never seen before.
+Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval. Stage 3 tests whether the agent can extract symbolic movement rules from raw grid experience and use them for generative prediction — predicting correctly for states never seen before. Stage 4 introduces a second agent on the grid and tests whether M_0 can disentangle "I moved" from "they moved" — and build a theory of the other's behaviour.
 
 ## Theoretical Foundation
 
@@ -1008,16 +1008,62 @@ An agent that monitors all four paths can diagnose its environment type and sele
 
 ## Findings for Stage 4
 
-| Finding | Source | Implication | Stage 4 requirement |
+**Core question**: Can M_0 discover that another entity exists on the grid and build a predictive model of its behaviour?
+
+### Design
+
+Agent B is a fixed-policy entity (not learning) placed on the grid. From A's perspective, B is part of the environment — but B's state changes are not self-caused. A sees the full grid: A = color 1, B = color 2. No collision handling; agents can share cells (A takes visual priority).
+
+**Dual-path theory of mind**: Path O-A (state-conditioned prediction of B's action) vs Path O-B (frequency baseline of B's actions). Xi_other = O-A - O-B. Same CIF dual-path structure applied to the other-agent model.
+
+**Self-accuracy via grid stripping**: `strip_color(2)` removes B from predicted/actual grids to isolate A's self-model accuracy from B's interference.
+
+Five B policies tested: Random (uniform noise), Fixed (always UP), Patrol (cyclic UP/RIGHT/DOWN/LEFT), Chase (greedy toward A), Flee (greedy away from A).
+
+### Experiments
+
+| # | Command | B Policy | acc_A | acc_O | Xi_other | Xi_mem | Key finding |
+|---|---------|----------|-------|-------|----------|--------|-------------|
+| 0 | `cargo run --release` | None | 0.917 | — | — | 0.353 | Stage 0 reproduction (identical) |
+| 1 | `-- --other random` | Random | 0.242 | 0.233 | -0.035 | 0.242 | Random other destroys self-model (-73.6%) |
+| 2 | `-- --other fixed` | Fixed(UP) | 0.825 | 0.997 | 0.000 | 0.401 | Fixed B learned perfectly; self degrades 10% |
+| 3 | `-- --other patrol` | Patrol(5) | 1.000 | 1.000 | 0.812 | 0.755 | Both self + other: PERFECT. Xi_other largest |
+| 4 | `-- --other patrol --patrol-period 20` | Patrol(20) | 0.970 | 0.970 | 0.775 | 0.400 | Slower patrol: still strong, fewer obs needed |
+| 5 | `-- --other chase` | Chase | 0.831 | 0.739 | 0.237 | 0.245 | Reactive B harder; state-conditioned > freq |
+| 6 | `-- --other flee` | Flee | 0.917 | 0.925 | 0.163 | 0.353 | Flee = easiest reactive. Self fully preserved |
+| 7 | `-- --other random --noise 0.2` | Random+noise | 0.185 | 0.237 | -0.028 | 0.172 | Compound noise: worst case (acc_A = 0.185) |
+| 8 | `-- --other patrol --rules` | Patrol+rules | 1.000 | 1.000 | 0.812 | 0.755 | Rules don't help/hurt when memory is perfect |
+| 9 | `-- --other patrol --context 2` | Patrol+temporal | 1.000 | 1.000 | 0.812 | 0.755 | Temporal doesn't help when memory is perfect |
+
+### Discoveries
+
+**Discovery 1: The fragmentation tax is MASSIVE for unpredictable others.** Random B drops acc_A from 0.917 to 0.242 — a 73.6% collapse. Every B movement creates a new grid state that has never been seen before, fragmenting memory. 1882 unique tuples (vs 72 without B) with consolidation ratio 0.376 (vs 0.014). The memory system wasn't designed to track another entity separately — it stores full grids, so B's position is entangled with A's self-model.
+
+**Discovery 2: Predictable others HELP the self-model.** Patrol B achieves acc_A = 1.000 (vs 0.917 without B). This is counterintuitive — adding complexity improves accuracy. The mechanism: Patrol B's position is deterministic, so the expanded state (A + B positions) is still fully deterministic. The grid with B has MORE features to match on, reducing ambiguity in memory lookups. B's predictable trajectory actually acts as a landmark.
+
+**Discovery 3: Xi_other measures theory-of-mind sophistication.** Xi_other = 0 means frequency baseline is as good as state-conditioned model (B is trivially predictable — Fixed policy). Xi_other = 0.812 means state matters enormously (Patrol — B's action depends on where it is in the cycle, which correlates with grid state). Xi_other < 0 means the state-conditioned model is WORSE than frequency (Random — state adds noise, not signal). The Xi_other signal perfectly diagnoses B's policy type.
+
+**Discovery 4: Chase is harder than Flee.** Chase (acc_O = 0.739) vs Flee (acc_O = 0.925). Chase creates more varied trajectories because B converges toward A from different angles as A explores. Flee is more predictable because B is usually at an edge, fleeing in a constrained direction. The asymmetry reveals that predicting *approach* is harder than predicting *avoidance* — the approaching agent has more state-dependent options.
+
+**Discovery 5: The self/other boundary is architectural, not just computational.** M_0 stores full grid states, so B's position is entangled in A's self-model. When B is unpredictable (Random), this entanglement destroys self-prediction. When B is predictable (Patrol), the entanglement is benign. This proves that precondition #3 (self/world tag) needs to be STRUCTURAL — the system needs to explicitly model "my changes" separately from "their changes." A `strip_color(2)` post-processing step fixes this for measurement but doesn't help the agent's learning.
+
+### Failure modes
+
+1. **Memory fragmentation from unpredictable other**: Random B creates 1882 unique tuples — each slightly different due to B's position. Memory retrieval finds "approximate" matches that are wrong because B has moved.
+2. **Entangled self/other representation**: The grid includes both agents, so the agent can't distinguish "I moved" from "they moved" in memory. Same limitation as drift in Stage 2, but worse.
+3. **State-conditioned other model doesn't help for random B**: Xi_other = -0.035 for Random — the state-conditioned model is noise, not signal. Correct response is to fall back to frequency baseline.
+4. **Rules can't help when the problem is representation**: Experiment 8 shows rules + patrol = same as patrol alone. Rules compress A's movement patterns, but B's presence is a representation problem, not a compression problem.
+
+### Findings for Stage 5
+
+| Finding | Source | Implication | Stage 5 requirement |
 |---|---|---|---|
-| Rules generalise beyond experience | Stage 3 experiment 6 | +16.9pp over memory in 10x10 world | Exploit generalisation in larger/richer environments |
-| Rules fail under temporal structure | Stage 3 experiments 3-5 | Phase mixing corrupts MLE deltas | Phase-conditional rule extraction |
-| Confidence diagnoses rule quality | Stage 3 discovery 3 | 1.000 = reliable, <0.8 = unreliable | Use confidence for adaptive strategy selection |
-| Path ordering reveals environment type | Stage 3 discovery 5 | Xi vector characterises the environment | Meta-learning from Xi signals |
-| Rules saturate quickly | Stage 3 experiment 8 | ~100 episodes enough for invariants | Early rule extraction, then refine |
-| Rules and memory are complementary | Stage 3 all experiments | Rules for novel states, memory for familiar noisy states | Hybrid prediction strategy |
-| Compression ratio 9-20:1 | Stage 3 discovery 4 | 8 rules vs 72-172 tuples | Scale to richer environments |
-| Perfect prediction achievable | Stage 3 experiment 7 | acc_R = 1.000 with adaptive temp on 10x10 | Deterministic ceiling confirmed |
+| Self/other boundary must be structural | Discovery 5 | Full-grid memory entangles agents | Separate self-model from world-model |
+| Predictable others improve self-model | Discovery 2 | Landmark effect from deterministic B | Explicit other-model that augments self-model |
+| Xi_other diagnoses other's policy | Discovery 3 | 0=trivial, >0=learnable, <0=random | Meta-learning from Xi signals |
+| Chase harder than flee | Discovery 4 | Approaching agents have more options | Model needs to capture intent, not just pattern |
+| Random other = worst case | Discovery 1 | -73.6% self-model collapse | Must detect "unpredictable" and stop trying to model |
+| Memory fragmentation from B | Experiments 1,7 | 1882 tuples, consolidation 0.376 | Need memory that factors out irrelevant dimensions |
 
 ## Reproducing
 
@@ -1095,6 +1141,26 @@ cargo run --release -- --rules --drift
 # Full stack — all four paths different
 cargo run --release -- --rules --drift --noise 0.2 --context 2
 
+# ── Stage 4 (other agents) ──────────────────────────────────────
+
+# Random other — self-model collapse (acc_A = 0.242)
+cargo run --release -- --other random
+
+# Fixed other — easiest B, near-perfect other-model (acc_O = 0.997)
+cargo run --release -- --other fixed
+
+# Patrol other — perfect self + other (acc_A=1.000, acc_O=1.000, Xi_other=0.812)
+cargo run --release -- --other patrol
+
+# Chase other — reactive, state-dependent (acc_O = 0.739)
+cargo run --release -- --other chase
+
+# Flee other — reactive, self-model preserved (acc_O = 0.925)
+cargo run --release -- --other flee
+
+# Compound noise: random B + action noise (worst case)
+cargo run --release -- --other random --noise 0.2
+
 # Full options
 cargo run --release -- --help
 ```
@@ -1105,19 +1171,20 @@ cargo run --release -- --help
 
 ```
 src/
-  grid.rs       Grid type + Hamming distance + marker detection (state representation)
-  config.rs     M0Config (all tunable parameters, Stages 0–3)
-  world.rs      MicroWorld (deterministic, stochastic, or drifting grid environment)
+  grid.rs       Grid type + Hamming distance + marker detection + strip_color (state representation)
+  config.rs     M0Config (all tunable parameters, Stages 0–4)
+  world.rs      MicroWorld (deterministic, stochastic, drifting, or multi-agent grid environment)
   memory.rs     ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
   temporal.rs   TemporalMemory (context-window episodic memory, Stage 2)
   rules.rs      RuleSet (symbolic movement rules, generative prediction, Stage 3)
-  agent.rs      Stage0Agent (four-way prediction, curiosity-weighted softmax, adaptive temperature)
-  metrics.rs    Instrumentation (15 metrics + strand checkpoints + rule diagnosis)
-  main.rs       CLI runner (the loop with history buffer + rule extraction)
+  other.rs      OtherAgent + OtherPolicy (5 fixed-policy behaviours, Stage 4)
+  agent.rs      Stage0Agent (six-way prediction, theory of mind, curiosity-weighted softmax)
+  metrics.rs    Instrumentation (20+ metrics + strand checkpoints + rule + other diagnosis)
+  main.rs       CLI runner (the loop with history buffer + rule extraction + other-agent tracking)
   lib.rs        Module exports
 ```
 
-~1800 lines of Rust. 67 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
+~3400 lines of Rust. 85 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
 
 ## Theoretical Context
 
@@ -1129,8 +1196,8 @@ This experiment tests the first stage of a curriculum for building a CIF-based c
 | **1** | M_0 survives noise; memory is MLE | Stochastic grid | Flat Vec (unchanged) | **DONE** — 84.5% acc at 20% noise |
 | **2** | Temporal context is a specialist tool | Drifting grid | Episodic (context-window) | **DONE** — Xi_temp +0.115 (noise+drift) |
 | **3** | Rules generalise beyond experience | Large grid | Symbolic (rules) + episodic | **DONE** — acc_R=1.000, Xi_rule=+0.169 |
-| 4 | Other agents exist | Multi-agent | Theory of mind | Next |
-| 5 | Self-model improves predictions | Reflexive | Meta-memory | |
+| **4** | Other agents exist | Multi-agent | Theory of mind (dual-path O-A/O-B) | **DONE** — acc_O=1.000, Xi_other=+0.812 |
+| 5 | Self-model improves predictions | Reflexive | Meta-memory | Next |
 
 Stage 0 answered: *can M_0 bootstrap at all?* Yes, in a deterministic environment.
 
@@ -1139,6 +1206,8 @@ Stage 1 answered: *does M_0 survive noise?* Yes — and memory becomes MORE valu
 Stage 2 answered: *can M_0 learn temporal structure?* Yes, but only when the memoryless MLE is sufficiently degraded. Temporal context is a double-edged sword: it fragments memory, and the fragmentation tax (-22.3pp in Markovian worlds) must be exceeded by temporal signal. The conditions where temporal memory helps (noise + drift, slow drift) are narrow. The key insight: **temporal memory should be a conditional mechanism, not a default one.**
 
 Stage 3 answered: *can M_0 compress experience into symbolic rules?* Yes — and rules generalise to states never seen before. 8 rules replace 163 tuples at 20:1 compression and beat memory by 16.9pp on a 10x10 grid. With adaptive temperature, rules achieve perfect prediction (acc_R = 1.000). But rules fail under temporal drift (-27.7pp) because they average across phases. The key insight: **compression that captures invariants generalises; compression that averages across regimes destroys information.**
+
+Stage 4 answered: *can M_0 discover another entity and build a predictive model?* Yes — with dramatic range. For predictable others (Patrol), M_0 achieves perfect prediction of both self and other (acc_A = 1.000, acc_O = 1.000, Xi_other = 0.812). For reactive others (Chase/Flee), the state-conditioned model outperforms frequency baseline. But for unpredictable others (Random), the self-model collapses by 73.6% due to memory fragmentation — B's random movements create unique grid states that poison memory retrieval. The key insight: **the self/other boundary must be structural, not just computational.** Storing full grids entangles the agent's self-model with the other's position. Factored representations — modelling "my state" separately from "their state" — are required for robust multi-agent prediction.
 
 ## License
 

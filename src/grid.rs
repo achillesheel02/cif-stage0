@@ -78,6 +78,31 @@ impl Grid {
         }
         None
     }
+
+    /// Find the other agent's marker (cell with value 2). Returns (row, col).
+    pub fn find_other(&self) -> Option<(usize, usize)> {
+        for r in 0..self.height {
+            for c in 0..self.width {
+                if self.cells[r][c] == 2 {
+                    return Some((r, c));
+                }
+            }
+        }
+        None
+    }
+
+    /// Return a copy with all cells of `color` set to 0.
+    pub fn strip_color(&self, color: u8) -> Grid {
+        let mut g = self.clone();
+        for r in 0..g.height {
+            for c in 0..g.width {
+                if g.cells[r][c] == color {
+                    g.cells[r][c] = 0;
+                }
+            }
+        }
+        g
+    }
 }
 
 impl std::fmt::Display for Grid {
@@ -147,6 +172,39 @@ mod tests {
     fn test_find_marker_empty() {
         let g = Grid::filled(5, 5, 0);
         assert_eq!(g.find_marker(), None);
+    }
+
+    #[test]
+    fn test_find_other_present() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(3, 4, 2);
+        assert_eq!(g.find_other(), Some((3, 4)));
+    }
+
+    #[test]
+    fn test_find_other_absent() {
+        let g = Grid::filled(5, 5, 0);
+        assert_eq!(g.find_other(), None);
+    }
+
+    #[test]
+    fn test_find_other_with_both_markers() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(2, 2, 1);
+        g.set(4, 4, 2);
+        assert_eq!(g.find_marker(), Some((2, 2)));
+        assert_eq!(g.find_other(), Some((4, 4)));
+    }
+
+    #[test]
+    fn test_strip_color_removes_only_target() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(2, 2, 1);
+        g.set(4, 4, 2);
+        let stripped = g.strip_color(2);
+        assert_eq!(stripped.find_marker(), Some((2, 2)));
+        assert_eq!(stripped.find_other(), None);
+        assert_eq!(stripped.get(4, 4), Some(0));
     }
 
     #[test]

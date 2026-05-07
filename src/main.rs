@@ -13,13 +13,16 @@ use cif_stage0::agent::Stage0Agent;
 use cif_stage0::config::M0Config;
 use cif_stage0::grid::Grid;
 use cif_stage0::metrics::Metrics;
+use cif_stage0::other::OtherPolicy;
 use cif_stage0::world::MicroWorld;
 use std::collections::VecDeque;
 
 fn main() {
     let config = parse_args();
 
-    let stage = if config.rules_enabled {
+    let stage = if config.other_policy != OtherPolicy::None {
+        "Stage 4 — Other Agents"
+    } else if config.rules_enabled {
         "Stage 3 — Symbolic Compression"
     } else if config.drift_enabled || config.context_len > 0 {
         "Stage 2 — Temporal Bootstrap"
@@ -43,11 +46,16 @@ fn main() {
     if config.rules_enabled {
         println!("Rules: enabled | Rule interval: {}", config.rule_interval);
     }
+    if config.other_policy != OtherPolicy::None {
+        println!("Other: {:?} | Other seed: {} | Patrol period: {}",
+            config.other_policy, config.other_seed, config.patrol_period);
+    }
     println!();
 
-    let mut world = MicroWorld::with_drift(
+    let mut world = MicroWorld::with_other(
         config.world_size, config.noise, config.seed,
         config.drift_enabled, config.drift_period,
+        config.other_policy, config.other_seed, config.patrol_period,
     );
     let mut agent = Stage0Agent::new(config.clone());
     let mut metrics = Metrics::new();
@@ -76,6 +84,16 @@ fn main() {
 
         // Update history (BEFORE record consumes state)
         let state_for_history = state.clone();
+
+        // Stage 4: other-agent prediction
+        let other_action = world.other_last_action();
+        if let Some(oa) = other_action {
+            let pred_o = agent.predict_other_action(&state);
+            let pred_o_freq = agent.predict_other_freq();
+            let hit_o = pred_o == Some(oa);
+            let hit_o_freq = pred_o_freq == Some(oa);
+            agent.record_other(&state, oa, hit_o, hit_o_freq, action);
+        }
 
         // Record experience
         agent.record(action, state, actual, hit_r, hit_t, hit_a, hit_b, &context);
@@ -193,6 +211,31 @@ fn parse_args() -> M0Config {
                     config.rule_interval = val.parse().unwrap_or(config.rule_interval);
                 }
             }
+            "--other" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.other_policy = match val.as_str() {
+                        "random" => OtherPolicy::Random,
+                        "fixed" => OtherPolicy::Fixed,
+                        "patrol" => OtherPolicy::Patrol,
+                        "chase" => OtherPolicy::Chase,
+                        "flee" => OtherPolicy::Flee,
+                        _ => OtherPolicy::None,
+                    };
+                }
+            }
+            "--other-seed" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.other_seed = val.parse().unwrap_or(config.other_seed);
+                }
+            }
+            "--patrol-period" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.patrol_period = val.parse().unwrap_or(config.patrol_period);
+                }
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -212,6 +255,9 @@ fn parse_args() -> M0Config {
                 println!("  --context K       Temporal context window size (default: 0)");
                 println!("  --rules           Enable rule extraction (Stage 3)");
                 println!("  --rule-interval N Re-extract rules every N episodes (default: 100)");
+                println!("  --other POLICY    Other agent policy: random|fixed|patrol|chase|flee (Stage 4)");
+                println!("  --other-seed N    RNG seed for other agent (default: 137)");
+                println!("  --patrol-period N Steps per patrol phase (default: 5)");
                 std::process::exit(0);
             }
             _ => {}

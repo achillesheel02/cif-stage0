@@ -4,6 +4,7 @@
 /// about whether the bootstrap is working.
 
 use crate::agent::Stage0Agent;
+use crate::other::OtherPolicy;
 use strand_core::{Config, StrandMatrix};
 
 /// A single metrics snapshot.
@@ -25,6 +26,9 @@ pub struct Snapshot {
     pub rule_count: usize,
     pub rule_confidence: f64,
     pub confidence: f64,
+    pub accuracy_o: f64,
+    pub xi_other: f64,
+    pub self_accuracy: f64,
 }
 
 /// A strand checkpoint — dual-path convergence across actions.
@@ -72,10 +76,20 @@ impl Metrics {
             rule_count: agent.rule_set.rule_count(),
             rule_confidence: agent.rule_set.avg_confidence(),
             confidence: agent.avg_prediction_confidence(),
+            accuracy_o: agent.path_o_accuracy(),
+            xi_other: agent.other_advantage(),
+            self_accuracy: 0.0, // Computed in main loop, not here
         };
 
         if !self.header_printed {
-            if agent.config.rules_enabled {
+            if agent.config.other_policy != OtherPolicy::None {
+                println!(
+                    "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                    "episode", "acc_A", "acc_B", "acc_O", "acc_Ofrq", "xi_other", "xi_mem",
+                    "consol", "entropy", "frobenius", "gap"
+                );
+                println!("{}", "-".repeat(110));
+            } else if agent.config.rules_enabled {
                 println!(
                     "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
                     "episode", "acc_R", "acc_T", "acc_A", "acc_B", "xi_rule", "xi_temp", "xi_mem",
@@ -108,7 +122,22 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        if agent.config.rules_enabled {
+        if agent.config.other_policy != OtherPolicy::None {
+            println!(
+                "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+                snap.episode,
+                snap.accuracy,
+                agent.path_b_accuracy(),
+                snap.accuracy_o,
+                agent.other_freq_accuracy(),
+                snap.xi_other,
+                snap.path_advantage,
+                snap.consolidation,
+                snap.entropy,
+                frob_str,
+                gap_str,
+            );
+        } else if agent.config.rules_enabled {
             println!(
                 "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
                 snap.episode,
@@ -201,7 +230,9 @@ impl Metrics {
 
     /// Print a summary at the end of the run.
     pub fn summary(&self, agent: &Stage0Agent) {
-        let stage_label = if agent.config.rules_enabled {
+        let stage_label = if agent.config.other_policy != OtherPolicy::None {
+            "STAGE 4 SUMMARY"
+        } else if agent.config.rules_enabled {
             "STAGE 3 SUMMARY"
         } else if agent.config.context_len > 0 || agent.config.drift_enabled {
             "STAGE 2 SUMMARY"
@@ -280,6 +311,24 @@ impl Metrics {
             println!(
                 "Rule confidence:       {:.3}",
                 agent.rule_set.avg_confidence()
+            );
+        }
+        if agent.config.other_policy != OtherPolicy::None {
+            println!(
+                "Path O accuracy:       {:.3}",
+                agent.path_o_accuracy()
+            );
+            println!(
+                "Path O-freq accuracy:  {:.3}",
+                agent.other_freq_accuracy()
+            );
+            println!(
+                "Xi other (O-Ofreq):    {:.3}",
+                agent.other_advantage()
+            );
+            println!(
+                "Other observations:    {}",
+                agent.other_observation_count()
             );
         }
         println!(
@@ -391,6 +440,25 @@ impl Metrics {
             }
             if agent.config.drift_enabled && xi_r < -0.05 {
                 println!("  RULES DEGRADE UNDER DRIFT — Xi_rule={:.3}. MLE delta corrupted by phase mixing.", xi_r);
+            }
+        }
+
+        // Other-agent diagnosis
+        if agent.config.other_policy != OtherPolicy::None {
+            let acc_o = agent.path_o_accuracy();
+            let xi_o = agent.other_advantage();
+            if acc_o > 0.9 {
+                println!("  OTHER-MODEL STRONG — acc_O={:.3}, reliable theory of B.", acc_o);
+            } else if acc_o > 0.5 {
+                println!("  OTHER-MODEL DISCOVERED — acc_O={:.3}, M_0 predicts B above chance.", acc_o);
+            } else if acc_o > 0.3 {
+                println!("  OTHER-MODEL WEAK — acc_O={:.3}, some signal but noisy.", acc_o);
+            }
+            if xi_o > 0.1 {
+                println!("  STATE-CONDITIONED MODEL OUTPERFORMS FREQUENCY — Xi_other={:.3}.", xi_o);
+            }
+            if acc < 0.5 && agent.config.noise == 0.0 && !agent.config.drift_enabled {
+                println!("  SELF-MODEL DEGRADED — B's presence fragments memory.");
             }
         }
 

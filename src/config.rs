@@ -3,6 +3,8 @@
 /// Each parameter is a hypothesis about what the bootstrap needs.
 /// Ablation: remove one, see what breaks.
 
+use crate::other::OtherPolicy;
+
 #[derive(Debug, Clone)]
 pub struct M0Config {
     /// Grid dimension (default 5 → 25 positions → 100 state-action pairs).
@@ -43,6 +45,12 @@ pub struct M0Config {
     pub rules_enabled: bool,
     /// Re-extract rules every N episodes.
     pub rule_interval: u64,
+    /// Other agent policy (Stage 4). None = no other agent.
+    pub other_policy: OtherPolicy,
+    /// Separate RNG seed for Agent B.
+    pub other_seed: u64,
+    /// Steps per direction for Patrol policy.
+    pub patrol_period: u64,
 }
 
 impl Default for M0Config {
@@ -67,6 +75,9 @@ impl Default for M0Config {
             context_len: 0,
             rules_enabled: false,
             rule_interval: 100,
+            other_policy: OtherPolicy::None,
+            other_seed: 137,
+            patrol_period: 5,
         }
     }
 }

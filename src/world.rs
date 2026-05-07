@@ -5,6 +5,7 @@
 /// The system must discover that its actions reliably move the marker.
 
 use crate::grid::Grid;
+use crate::other::{OtherAgent, OtherPolicy};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -26,6 +27,7 @@ pub struct MicroWorld {
     drift_enabled: bool,
     drift_period: u64,
     drift_step: u64,
+    other: Option<OtherAgent>,
 }
 
 impl MicroWorld {
@@ -51,13 +53,33 @@ impl MicroWorld {
             drift_enabled,
             drift_period,
             drift_step: 0,
+            other: None,
         }
+    }
+
+    /// Create a world with another agent (Stage 4).
+    pub fn with_other(
+        size: usize, noise: f64, seed: u64,
+        drift_enabled: bool, drift_period: u64,
+        other_policy: OtherPolicy, other_seed: u64, patrol_period: u64,
+    ) -> Self {
+        let mut world = Self::with_drift(size, noise, seed, drift_enabled, drift_period);
+        if other_policy != OtherPolicy::None {
+            world.other = Some(OtherAgent::new(size, other_policy, other_seed, patrol_period));
+        }
+        world
     }
 
     /// Observe the current state as a Grid.
     pub fn observe(&self) -> Grid {
         let mut grid = Grid::filled(self.size, self.size, BG_COLOR);
         grid.set(self.marker_row, self.marker_col, MARKER_COLOR);
+        if let Some(ref other) = self.other {
+            let (or, oc) = other.pos();
+            if grid.get(or, oc) == Some(BG_COLOR) {
+                grid.set(or, oc, 2);
+            }
+        }
         grid
     }
 
@@ -111,6 +133,11 @@ impl MicroWorld {
             self.drift_step += 1;
         }
 
+        if let Some(ref mut other) = self.other {
+            let b_action = other.decide(self.marker_row, self.marker_col);
+            other.apply_movement(b_action);
+        }
+
         executed
     }
 
@@ -128,6 +155,14 @@ impl MicroWorld {
 
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    pub fn other_last_action(&self) -> Option<u8> {
+        self.other.as_ref().map(|o| o.last_action())
+    }
+
+    pub fn other_pos(&self) -> Option<(usize, usize)> {
+        self.other.as_ref().map(|o| o.pos())
     }
 }
 
@@ -339,5 +374,48 @@ mod tests {
             assert_eq!(w1.apply(a), w2.apply(a));
         }
         assert_eq!(w1.observe(), w2.observe());
+    }
+
+    // ── Stage 4 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_no_other_is_stage0_3() {
+        let mut w1 = MicroWorld::with_drift(5, 0.0, 42, false, 10);
+        let mut w2 = MicroWorld::with_other(5, 0.0, 42, false, 10, OtherPolicy::None, 137, 5);
+        let actions = [ACTION_UP, ACTION_RIGHT, ACTION_DOWN, ACTION_LEFT];
+        for &a in &actions {
+            assert_eq!(w1.apply(a), w2.apply(a));
+        }
+        assert_eq!(w1.observe(), w2.observe());
+    }
+
+    #[test]
+    fn test_other_appears_on_grid() {
+        let w = MicroWorld::with_other(5, 0.0, 42, false, 10, OtherPolicy::Fixed, 137, 5);
+        let grid = w.observe();
+        assert!(grid.find_other().is_some(), "Other agent should appear on grid");
+    }
+
+    #[test]
+    fn test_other_moves_after_apply() {
+        let mut w = MicroWorld::with_other(5, 0.0, 42, false, 10, OtherPolicy::Fixed, 137, 5);
+        let pos_before = w.other_pos().unwrap();
+        w.apply(ACTION_UP);
+        let pos_after = w.other_pos().unwrap();
+        // Fixed = UP, so B should have moved up (from (4,4) to (3,4))
+        assert_ne!(pos_before, pos_after);
+        assert_eq!(pos_after.0, pos_before.0 - 1);
+    }
+
+    #[test]
+    fn test_overlap_a_priority() {
+        let mut w = MicroWorld::with_other(5, 0.0, 42, false, 10, OtherPolicy::Chase, 137, 5);
+        // Chase B toward A until they overlap. A at center (2,2), B starts at (4,4).
+        for _ in 0..20 {
+            w.apply(ACTION_UP); // A moves up, but B chases
+        }
+        let grid = w.observe();
+        // A's marker should be visible at A's position
+        assert_eq!(grid.get(w.marker_pos().0, w.marker_pos().1), Some(1));
     }
 }

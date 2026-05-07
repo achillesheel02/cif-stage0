@@ -14,6 +14,7 @@
 use crate::config::M0Config;
 use crate::grid::Grid;
 use crate::memory::ExperienceMemory;
+use crate::other::OtherPolicy;
 use crate::rules::RuleSet;
 use crate::temporal::TemporalMemory;
 use rand::rngs::StdRng;
@@ -39,6 +40,14 @@ pub struct Stage0Agent {
     action_counts: Vec<u64>,
     /// Current temperature.
     temperature: f64,
+    /// State-conditioned other-action observations: (state, action_B, count).
+    other_observations: Vec<(Grid, u8, u32)>,
+    /// Global frequency count of B's actions (Path O-B baseline).
+    other_action_freq: Vec<u64>,
+    /// Rolling accuracy for other-prediction (Path O-A).
+    path_o_hits: Vec<VecDeque<bool>>,
+    /// Rolling accuracy for other-frequency baseline (Path O-B).
+    path_o_freq_hits: Vec<VecDeque<bool>>,
 }
 
 impl Stage0Agent {
@@ -61,6 +70,10 @@ impl Stage0Agent {
             path_a_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
             path_b_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
             action_counts: vec![0; n],
+            other_observations: Vec::new(),
+            other_action_freq: vec![0; n],
+            path_o_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
+            path_o_freq_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
         }
     }
 
@@ -375,6 +388,134 @@ impl Stage0Agent {
         self.temperature
     }
 
+    // ── Stage 4: Theory of Mind ────────────────────────────────────────
+
+    /// Predict B's next action from current state (Path O-A, state-conditioned).
+    pub fn predict_other_action(&self, state: &Grid) -> Option<u8> {
+        if self.config.other_policy == OtherPolicy::None || self.other_observations.is_empty() {
+            return None;
+        }
+
+        // Exact match first
+        let mut best_action: Option<u8> = None;
+        let mut best_count: u32 = 0;
+        for (s, a, c) in &self.other_observations {
+            if s == state && *c > best_count {
+                best_action = Some(*a);
+                best_count = *c;
+            }
+        }
+        if best_action.is_some() {
+            return best_action;
+        }
+
+        // Approximate: find closest state, return its MLE action
+        let mut min_dist = usize::MAX;
+        for (s, a, c) in &self.other_observations {
+            let d = state.hamming_distance(s);
+            if d < min_dist || (d == min_dist && *c > best_count) {
+                min_dist = d;
+                best_action = Some(*a);
+                best_count = *c;
+            }
+        }
+        best_action
+    }
+
+    /// Predict B's most frequent action overall (Path O-B, frequency baseline).
+    pub fn predict_other_freq(&self) -> Option<u8> {
+        let total: u64 = self.other_action_freq.iter().sum();
+        if total == 0 {
+            return None;
+        }
+        let (best_idx, _) = self
+            .other_action_freq
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, &c)| c)?;
+        Some(best_idx as u8)
+    }
+
+    /// Record an observation of B's action.
+    pub fn record_other(&mut self, state: &Grid, other_action: u8, hit_o: bool, hit_o_freq: bool, my_action: u8) {
+        // Update frequency
+        if (other_action as usize) < self.other_action_freq.len() {
+            self.other_action_freq[other_action as usize] += 1;
+        }
+
+        // Dedup store
+        let mut found = false;
+        for (s, a, c) in &mut self.other_observations {
+            if s == state && *a == other_action {
+                *c += 1;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            self.other_observations.push((state.clone(), other_action, 1));
+        }
+
+        // Update rolling accuracy
+        let a = my_action as usize;
+        if a < self.config.n_actions {
+            let window = self.config.accuracy_window;
+            let hits = &mut self.path_o_hits[a];
+            if hits.len() >= window {
+                hits.pop_front();
+            }
+            hits.push_back(hit_o);
+
+            let freq_hits = &mut self.path_o_freq_hits[a];
+            if freq_hits.len() >= window {
+                freq_hits.pop_front();
+            }
+            freq_hits.push_back(hit_o_freq);
+        }
+    }
+
+    /// Path O-A accuracy (state-conditioned other-prediction).
+    pub fn path_o_accuracy(&self) -> f64 {
+        let (hits, total) = self
+            .path_o_hits
+            .iter()
+            .fold((0usize, 0usize), |(h, t), deque| {
+                let deque_hits = deque.iter().filter(|&&b| b).count();
+                (h + deque_hits, t + deque.len())
+            });
+        if total == 0 { 0.0 } else { hits as f64 / total as f64 }
+    }
+
+    /// Path O-B accuracy (frequency baseline other-prediction).
+    pub fn other_freq_accuracy(&self) -> f64 {
+        let (hits, total) = self
+            .path_o_freq_hits
+            .iter()
+            .fold((0usize, 0usize), |(h, t), deque| {
+                let deque_hits = deque.iter().filter(|&&b| b).count();
+                (h + deque_hits, t + deque.len())
+            });
+        if total == 0 { 0.0 } else { hits as f64 / total as f64 }
+    }
+
+    /// Xi_other = path_o_accuracy - other_freq_accuracy (value of state-conditioned model).
+    pub fn other_advantage(&self) -> f64 {
+        self.path_o_accuracy() - self.other_freq_accuracy()
+    }
+
+    /// Number of stored other-agent observations.
+    pub fn other_observation_count(&self) -> usize {
+        self.other_observations.len()
+    }
+
+    /// Compare predicted vs actual on self-marker only (strip color=2).
+    pub fn self_hit(predicted: &Option<Grid>, actual: &Grid) -> bool {
+        match predicted {
+            Some(p) => p.strip_color(2) == actual.strip_color(2),
+            None => false,
+        }
+    }
+
     /// Average prediction confidence across unique (action, state_before) pairs.
     pub fn avg_prediction_confidence(&self) -> f64 {
         let mut seen: Vec<(u8, &Grid)> = Vec::new();
@@ -665,6 +806,61 @@ mod tests {
         let pred_r = agent.predict_rule(0, &before);
         let pred_a = agent.predict_path_a(0, &before);
         assert_eq!(pred_r, pred_a);
+    }
+
+    // ── Stage 4 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_predict_other_none_without_other() {
+        let agent = Stage0Agent::new(M0Config::default());
+        let state = Grid::filled(5, 5, 0);
+        assert_eq!(agent.predict_other_action(&state), None);
+    }
+
+    #[test]
+    fn test_predict_other_learns_fixed() {
+        let mut config = M0Config::default();
+        config.other_policy = crate::other::OtherPolicy::Fixed;
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+
+        // Record B always going UP (action 0) in this state
+        for _ in 0..10 {
+            agent.record_other(&state, 0, true, true, 0);
+        }
+
+        let pred = agent.predict_other_action(&state);
+        assert_eq!(pred, Some(0)); // Should predict UP
+    }
+
+    #[test]
+    fn test_self_hit_ignores_b() {
+        let mut pred = Grid::filled(5, 5, 0);
+        pred.set(2, 2, 1);
+        pred.set(3, 3, 2); // B at wrong position
+
+        let mut actual = Grid::filled(5, 5, 0);
+        actual.set(2, 2, 1);
+        actual.set(4, 4, 2); // B at different position
+
+        // Self markers match (both at 2,2), so self_hit should be true
+        assert!(Stage0Agent::self_hit(&Some(pred), &actual));
+    }
+
+    #[test]
+    fn test_path_o_tracking() {
+        let mut config = M0Config::default();
+        config.other_policy = crate::other::OtherPolicy::Fixed;
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+
+        agent.record_other(&state, 0, true, true, 0);
+        agent.record_other(&state, 0, true, false, 0);
+        agent.record_other(&state, 0, false, false, 0);
+
+        // 2/3 hits for path_o, 1/3 for freq
+        assert!((agent.path_o_accuracy() - 2.0 / 3.0).abs() < 0.01);
+        assert!((agent.other_freq_accuracy() - 1.0 / 3.0).abs() < 0.01);
     }
 
     #[test]
