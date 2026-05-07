@@ -5,6 +5,7 @@
 
 use crate::agent::Stage0Agent;
 use crate::other::OtherPolicy;
+use crate::world::MicroWorld;
 use strand_core::{Config, StrandMatrix};
 
 /// A single metrics snapshot.
@@ -35,6 +36,9 @@ pub struct Snapshot {
     pub xi_reflexive: f64,
     pub self_unique_tuples: usize,
     pub self_consolidation: f64,
+    pub goals_reached: u64,
+    pub avg_steps_per_goal: f64,
+    pub navigation_efficiency: f64,
 }
 
 /// A strand checkpoint — dual-path convergence across actions.
@@ -64,7 +68,7 @@ impl Metrics {
     }
 
     /// Emit a metrics snapshot to stdout.
-    pub fn emit(&mut self, episode: u64, agent: &Stage0Agent) {
+    pub fn emit(&mut self, episode: u64, agent: &Stage0Agent, world: &MicroWorld) {
         let snap = Snapshot {
             episode,
             accuracy_r: agent.path_r_accuracy(),
@@ -91,10 +95,20 @@ impl Metrics {
             xi_reflexive: agent.reflexive_advantage(),
             self_unique_tuples: agent.self_unique_count(),
             self_consolidation: agent.self_consolidation_ratio(),
+            goals_reached: world.goals_reached(),
+            avg_steps_per_goal: world.avg_steps_per_goal(),
+            navigation_efficiency: world.avg_navigation_efficiency(),
         };
 
         if !self.header_printed {
-            if agent.config.self_model_enabled {
+            if agent.config.goal_enabled {
+                println!(
+                    "{:<8} {:>6} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                    "episode", "goals", "avg_steps", "effic", "acc_R", "acc_A", "acc_B",
+                    "consol", "entropy", "frobenius", "gap"
+                );
+                println!("{}", "-".repeat(115));
+            } else if agent.config.self_model_enabled {
                 println!(
                     "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
                     "episode", "acc_S", "acc_A", "acc_B", "xi_self", "xi_refl", "best_acc",
@@ -141,7 +155,22 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        if agent.config.self_model_enabled {
+        if agent.config.goal_enabled {
+            println!(
+                "{:<8} {:>6} {:>10.1} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+                snap.episode,
+                snap.goals_reached,
+                snap.avg_steps_per_goal,
+                snap.navigation_efficiency,
+                snap.accuracy_r,
+                snap.accuracy,
+                agent.path_b_accuracy(),
+                snap.consolidation,
+                snap.entropy,
+                frob_str,
+                gap_str,
+            );
+        } else if agent.config.self_model_enabled {
             println!(
                 "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
                 snap.episode,
@@ -264,8 +293,10 @@ impl Metrics {
     }
 
     /// Print a summary at the end of the run.
-    pub fn summary(&self, agent: &Stage0Agent) {
-        let stage_label = if agent.config.self_model_enabled {
+    pub fn summary(&self, agent: &Stage0Agent, world: &MicroWorld) {
+        let stage_label = if agent.config.goal_enabled {
+            "STAGE 6 SUMMARY"
+        } else if agent.config.self_model_enabled {
             "STAGE 5 SUMMARY"
         } else if agent.config.other_policy != OtherPolicy::None {
             "STAGE 4 SUMMARY"
@@ -544,6 +575,44 @@ impl Metrics {
             }
             if acc_s > 0.8 && acc < 0.3 {
                 println!("  SELF-MODEL RECOVERS — factored out other agent's noise (acc_S={:.3} vs acc_A={:.3}).", acc_s, acc);
+            }
+        }
+
+        // Goal + navigation diagnosis
+        if agent.config.goal_enabled {
+            let goals = world.goals_reached();
+            let eff = world.avg_navigation_efficiency();
+            let avg_steps = world.avg_steps_per_goal();
+            println!(
+                "Goals reached:         {}",
+                goals
+            );
+            if goals > 0 {
+                println!(
+                    "Avg steps per goal:    {:.1}",
+                    avg_steps
+                );
+                println!(
+                    "Navigation efficiency: {:.3}",
+                    eff
+                );
+            }
+            if agent.config.plan_enabled {
+                println!("Planning: model-based BFS (depth {})", agent.config.plan_depth);
+            } else if agent.config.greedy_enabled {
+                println!("Planning: greedy (Manhattan distance)");
+            } else {
+                println!("Planning: none (familiarity-based action selection)");
+            }
+            if goals > 0 && eff > 0.9 {
+                println!("  NAVIGATION NEAR-OPTIMAL — efficiency={:.3}, planner finds efficient paths.", eff);
+            } else if goals > 0 && eff > 0.5 {
+                println!("  NAVIGATION FUNCTIONAL — efficiency={:.3}, room for improvement.", eff);
+            } else if goals > 0 && eff < 0.5 && agent.config.plan_enabled {
+                println!("  PLANNER WEAK — efficiency={:.3}, model may be inaccurate or depth too shallow.", eff);
+            }
+            if goals == 0 && agent.config.max_episodes > 500 {
+                println!("  NO GOALS REACHED — check plan_depth or model coverage.");
             }
         }
 

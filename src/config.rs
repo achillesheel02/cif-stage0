@@ -53,6 +53,16 @@ pub struct M0Config {
     pub patrol_period: u64,
     /// Enable reflexive self-model (Stage 5).
     pub self_model_enabled: bool,
+    /// Enable goal marker on grid (Stage 6).
+    pub goal_enabled: bool,
+    /// Enable model-based BFS planner for navigation (Stage 6).
+    pub plan_enabled: bool,
+    /// Enable greedy baseline for navigation (Stage 6).
+    pub greedy_enabled: bool,
+    /// Maximum BFS depth for planner (Stage 6).
+    pub plan_depth: usize,
+    /// Separate RNG seed for goal placement.
+    pub goal_seed: u64,
 }
 
 impl Default for M0Config {
@@ -81,6 +91,11 @@ impl Default for M0Config {
             other_seed: 137,
             patrol_period: 5,
             self_model_enabled: false,
+            goal_enabled: false,
+            plan_enabled: false,
+            greedy_enabled: false,
+            plan_depth: 3,
+            goal_seed: 271,
         }
     }
 }

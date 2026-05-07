@@ -4,6 +4,7 @@ pub mod grid;
 pub mod memory;
 pub mod metrics;
 pub mod other;
+pub mod planner;
 pub mod rules;
 pub mod self_model;
 pub mod temporal;

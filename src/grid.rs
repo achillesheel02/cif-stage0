@@ -91,6 +91,18 @@ impl Grid {
         None
     }
 
+    /// Find the goal marker (cell with value 3). Returns (row, col).
+    pub fn find_goal(&self) -> Option<(usize, usize)> {
+        for r in 0..self.height {
+            for c in 0..self.width {
+                if self.cells[r][c] == 3 {
+                    return Some((r, c));
+                }
+            }
+        }
+        None
+    }
+
     /// Return a copy with all cells of `color` set to 0.
     pub fn strip_color(&self, color: u8) -> Grid {
         let mut g = self.clone();
@@ -103,6 +115,11 @@ impl Grid {
         }
         g
     }
+}
+
+/// Manhattan distance between two positions.
+pub fn manhattan(a: (usize, usize), b: (usize, usize)) -> usize {
+    a.0.abs_diff(b.0) + a.1.abs_diff(b.1)
 }
 
 impl std::fmt::Display for Grid {
@@ -205,6 +222,30 @@ mod tests {
         assert_eq!(stripped.find_marker(), Some((2, 2)));
         assert_eq!(stripped.find_other(), None);
         assert_eq!(stripped.get(4, 4), Some(0));
+    }
+
+    #[test]
+    fn test_find_goal_present() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(1, 1, 1);
+        g.set(3, 4, 3);
+        assert_eq!(g.find_goal(), Some((3, 4)));
+    }
+
+    #[test]
+    fn test_find_goal_absent() {
+        let mut g = Grid::filled(5, 5, 0);
+        g.set(2, 2, 1);
+        assert_eq!(g.find_goal(), None);
+    }
+
+    #[test]
+    fn test_manhattan_distance() {
+        assert_eq!(manhattan((0, 0), (0, 0)), 0);
+        assert_eq!(manhattan((0, 0), (3, 4)), 7);
+        assert_eq!(manhattan((4, 4), (0, 0)), 8);
+        assert_eq!(manhattan((2, 3), (2, 3)), 0);
+        assert_eq!(manhattan((1, 0), (4, 4)), 7);
     }
 
     #[test]

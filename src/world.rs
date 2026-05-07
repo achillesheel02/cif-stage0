@@ -4,7 +4,7 @@
 /// Properties: contingent, low-dimensional, low-noise, tight-loop.
 /// The system must discover that its actions reliably move the marker.
 
-use crate::grid::Grid;
+use crate::grid::{Grid, manhattan};
 use crate::other::{OtherAgent, OtherPolicy};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -28,6 +28,14 @@ pub struct MicroWorld {
     drift_period: u64,
     drift_step: u64,
     other: Option<OtherAgent>,
+    goal_row: Option<usize>,
+    goal_col: Option<usize>,
+    goal_rng: StdRng,
+    goals_reached: u64,
+    steps_since_goal: u64,
+    total_goal_steps: u64,
+    optimal_distance_at_spawn: usize,
+    total_optimal_distance: u64,
 }
 
 impl MicroWorld {
@@ -54,6 +62,14 @@ impl MicroWorld {
             drift_period,
             drift_step: 0,
             other: None,
+            goal_row: None,
+            goal_col: None,
+            goal_rng: StdRng::seed_from_u64(271),
+            goals_reached: 0,
+            steps_since_goal: 0,
+            total_goal_steps: 0,
+            optimal_distance_at_spawn: 0,
+            total_optimal_distance: 0,
         }
     }
 
@@ -70,16 +86,63 @@ impl MicroWorld {
         world
     }
 
+    /// Create a world with a goal marker (Stage 6).
+    pub fn with_goal(
+        size: usize, noise: f64, seed: u64,
+        drift_enabled: bool, drift_period: u64,
+        other_policy: OtherPolicy, other_seed: u64, patrol_period: u64,
+        goal_seed: u64,
+    ) -> Self {
+        let mut world = Self::with_other(size, noise, seed, drift_enabled, drift_period,
+            other_policy, other_seed, patrol_period);
+        world.goal_rng = StdRng::seed_from_u64(goal_seed);
+        world.spawn_goal();
+        world
+    }
+
+    /// Spawn a goal at a random position not occupied by the agent or other.
+    fn spawn_goal(&mut self) {
+        loop {
+            let r = self.goal_rng.gen_range(0..self.size);
+            let c = self.goal_rng.gen_range(0..self.size);
+            // Don't place on agent
+            if r == self.marker_row && c == self.marker_col {
+                continue;
+            }
+            // Don't place on other agent
+            if let Some(ref other) = self.other {
+                let (or, oc) = other.pos();
+                if r == or && c == oc {
+                    continue;
+                }
+            }
+            self.goal_row = Some(r);
+            self.goal_col = Some(c);
+            self.optimal_distance_at_spawn = manhattan(
+                (self.marker_row, self.marker_col), (r, c)
+            );
+            self.steps_since_goal = 0;
+            return;
+        }
+    }
+
     /// Observe the current state as a Grid.
+    /// Priority: self (1) > other (2) > goal (3) > background (0).
     pub fn observe(&self) -> Grid {
         let mut grid = Grid::filled(self.size, self.size, BG_COLOR);
-        grid.set(self.marker_row, self.marker_col, MARKER_COLOR);
+        // Goal first (lowest priority — will be overwritten by agents)
+        if let (Some(gr), Some(gc)) = (self.goal_row, self.goal_col) {
+            grid.set(gr, gc, 3);
+        }
+        // Other agent (overwrites goal if overlapping)
         if let Some(ref other) = self.other {
             let (or, oc) = other.pos();
-            if grid.get(or, oc) == Some(BG_COLOR) {
+            if grid.get(or, oc) != Some(MARKER_COLOR) {
                 grid.set(or, oc, 2);
             }
         }
+        // Self marker (highest priority)
+        grid.set(self.marker_row, self.marker_col, MARKER_COLOR);
         grid
     }
 
@@ -138,6 +201,17 @@ impl MicroWorld {
             other.apply_movement(b_action);
         }
 
+        // Goal tracking
+        if self.goal_row.is_some() {
+            self.steps_since_goal += 1;
+            if Some(self.marker_row) == self.goal_row && Some(self.marker_col) == self.goal_col {
+                self.goals_reached += 1;
+                self.total_goal_steps += self.steps_since_goal;
+                self.total_optimal_distance += self.optimal_distance_at_spawn as u64;
+                self.spawn_goal();
+            }
+        }
+
         executed
     }
 
@@ -163,6 +237,34 @@ impl MicroWorld {
 
     pub fn other_pos(&self) -> Option<(usize, usize)> {
         self.other.as_ref().map(|o| o.pos())
+    }
+
+    /// Current goal position, if active.
+    pub fn goal_pos(&self) -> Option<(usize, usize)> {
+        match (self.goal_row, self.goal_col) {
+            (Some(r), Some(c)) => Some((r, c)),
+            _ => None,
+        }
+    }
+
+    pub fn goals_reached(&self) -> u64 {
+        self.goals_reached
+    }
+
+    pub fn avg_steps_per_goal(&self) -> f64 {
+        if self.goals_reached == 0 {
+            0.0
+        } else {
+            self.total_goal_steps as f64 / self.goals_reached as f64
+        }
+    }
+
+    pub fn avg_navigation_efficiency(&self) -> f64 {
+        if self.goals_reached == 0 || self.total_optimal_distance == 0 {
+            0.0
+        } else {
+            self.total_optimal_distance as f64 / self.total_goal_steps as f64
+        }
     }
 }
 
@@ -405,6 +507,81 @@ mod tests {
         // Fixed = UP, so B should have moved up (from (4,4) to (3,4))
         assert_ne!(pos_before, pos_after);
         assert_eq!(pos_after.0, pos_before.0 - 1);
+    }
+
+    // ── Stage 6 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_goal_appears_on_grid() {
+        let w = MicroWorld::with_goal(5, 0.0, 42, false, 10, OtherPolicy::None, 137, 5, 271);
+        let grid = w.observe();
+        assert!(grid.find_goal().is_some(), "Goal should appear on grid");
+    }
+
+    #[test]
+    fn test_goal_not_on_agent() {
+        // Run multiple seeds — goal should never start on agent
+        for seed in 0..20 {
+            let w = MicroWorld::with_goal(5, 0.0, 42, false, 10, OtherPolicy::None, 137, 5, seed);
+            let goal = w.goal_pos().unwrap();
+            assert_ne!(goal, w.marker_pos(), "Goal should not be on agent (seed={})", seed);
+        }
+    }
+
+    #[test]
+    fn test_no_goal_backward_compat() {
+        let mut w1 = MicroWorld::with_other(5, 0.0, 42, false, 10, OtherPolicy::None, 137, 5);
+        let mut w2 = MicroWorld::with_drift(5, 0.0, 42, false, 10);
+        let actions = [ACTION_UP, ACTION_RIGHT, ACTION_DOWN, ACTION_LEFT];
+        for &a in &actions {
+            assert_eq!(w1.apply(a), w2.apply(a));
+        }
+        assert_eq!(w1.observe(), w2.observe());
+        assert_eq!(w1.goals_reached(), 0);
+    }
+
+    #[test]
+    fn test_goal_reached_increments() {
+        let mut w = MicroWorld::with_goal(5, 0.0, 42, false, 10, OtherPolicy::None, 137, 5, 271);
+        let goal = w.goal_pos().unwrap();
+        let start = w.marker_pos();
+        // Navigate to the goal manually
+        let dr = goal.0 as isize - start.0 as isize;
+        let dc = goal.1 as isize - start.1 as isize;
+        // Move vertically
+        let vert_action = if dr > 0 { ACTION_DOWN } else { ACTION_UP };
+        for _ in 0..dr.unsigned_abs() {
+            w.apply(vert_action);
+        }
+        // Move horizontally
+        let horiz_action = if dc > 0 { ACTION_RIGHT } else { ACTION_LEFT };
+        for _ in 0..dc.unsigned_abs() {
+            w.apply(horiz_action);
+        }
+        assert!(w.goals_reached() >= 1, "Should have reached at least 1 goal");
+    }
+
+    #[test]
+    fn test_goal_respawns() {
+        let mut w = MicroWorld::with_goal(5, 0.0, 42, false, 10, OtherPolicy::None, 137, 5, 271);
+        let goal1 = w.goal_pos().unwrap();
+        // Navigate to goal
+        let start = w.marker_pos();
+        let dr = goal1.0 as isize - start.0 as isize;
+        let dc = goal1.1 as isize - start.1 as isize;
+        let vert_action = if dr > 0 { ACTION_DOWN } else { ACTION_UP };
+        for _ in 0..dr.unsigned_abs() {
+            w.apply(vert_action);
+        }
+        let horiz_action = if dc > 0 { ACTION_RIGHT } else { ACTION_LEFT };
+        for _ in 0..dc.unsigned_abs() {
+            w.apply(horiz_action);
+        }
+        // Goal should have respawned at a new position
+        let goal2 = w.goal_pos().unwrap();
+        assert!(w.goals_reached() >= 1);
+        // New goal should not be on the agent
+        assert_ne!(goal2, w.marker_pos());
     }
 
     #[test]

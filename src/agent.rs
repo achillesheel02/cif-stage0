@@ -626,6 +626,25 @@ impl Stage0Agent {
         }
     }
 
+    // ── Stage 6: Goal-Directed Planning ─────────────────────────────────
+
+    /// Predict for planning rollouts.
+    /// Priority: Rules (generative, works on imagined states) > Self-model > Memory.
+    /// Excludes temporal (needs real context, unavailable during rollout).
+    pub fn predict_for_planning(&self, action: u8, state: &Grid) -> Option<Grid> {
+        if self.config.rules_enabled && self.rule_set.rule_count() > 0 {
+            if let Some(pred) = self.rule_set.predict(action, state) {
+                return Some(pred);
+            }
+        }
+        if let Some(ref sm) = self.self_memory {
+            if let Some(pred) = sm.retrieve(action, state) {
+                return Some(pred.clone());
+            }
+        }
+        self.memory.retrieve(action, state).cloned()
+    }
+
     /// Average prediction confidence across unique (action, state_before) pairs.
     pub fn avg_prediction_confidence(&self) -> f64 {
         let mut seen: Vec<(u8, &Grid)> = Vec::new();

@@ -14,13 +14,16 @@ use cif_stage0::config::M0Config;
 use cif_stage0::grid::Grid;
 use cif_stage0::metrics::Metrics;
 use cif_stage0::other::OtherPolicy;
+use cif_stage0::planner;
 use cif_stage0::world::MicroWorld;
 use std::collections::VecDeque;
 
 fn main() {
     let config = parse_args();
 
-    let stage = if config.self_model_enabled {
+    let stage = if config.goal_enabled {
+        "Stage 6 — Goal-Directed Planning"
+    } else if config.self_model_enabled {
         "Stage 5 — Reflexive Self-Model"
     } else if config.other_policy != OtherPolicy::None {
         "Stage 4 — Other Agents"
@@ -55,13 +58,26 @@ fn main() {
     if config.self_model_enabled {
         println!("Self-model: enabled");
     }
+    if config.goal_enabled {
+        println!("Goal: enabled | Plan: {} | Greedy: {} | Plan depth: {} | Goal seed: {}",
+            config.plan_enabled, config.greedy_enabled, config.plan_depth, config.goal_seed);
+    }
     println!();
 
-    let mut world = MicroWorld::with_other(
-        config.world_size, config.noise, config.seed,
-        config.drift_enabled, config.drift_period,
-        config.other_policy, config.other_seed, config.patrol_period,
-    );
+    let mut world = if config.goal_enabled {
+        MicroWorld::with_goal(
+            config.world_size, config.noise, config.seed,
+            config.drift_enabled, config.drift_period,
+            config.other_policy, config.other_seed, config.patrol_period,
+            config.goal_seed,
+        )
+    } else {
+        MicroWorld::with_other(
+            config.world_size, config.noise, config.seed,
+            config.drift_enabled, config.drift_period,
+            config.other_policy, config.other_seed, config.patrol_period,
+        )
+    };
     let mut agent = Stage0Agent::new(config.clone());
     let mut metrics = Metrics::new();
     let mut history: VecDeque<(u8, Grid)> = VecDeque::new();
@@ -69,7 +85,23 @@ fn main() {
     for episode in 0..config.max_episodes {
         let state = world.observe();
         let context: Vec<(u8, Grid)> = history.iter().cloned().collect();
-        let action = agent.select_action(&state, &context);
+
+        // Stage 6: goal-directed action selection (after warmup)
+        let action = if episode >= config.warmup_episodes && config.plan_enabled && config.goal_enabled {
+            if let Some(goal) = world.goal_pos() {
+                planner::plan_bfs(&agent, &state, goal, config.plan_depth).action
+            } else {
+                agent.select_action(&state, &context)
+            }
+        } else if episode >= config.warmup_episodes && config.greedy_enabled && config.goal_enabled {
+            if let (Some(goal), Some(pos)) = (world.goal_pos(), state.find_marker()) {
+                planner::greedy_action(pos, goal, config.world_size)
+            } else {
+                agent.select_action(&state, &context)
+            }
+        } else {
+            agent.select_action(&state, &context)
+        };
 
         // Four-way predictions BEFORE observing outcome
         let pred_r = agent.predict_rule(action, &state);
@@ -135,11 +167,11 @@ fn main() {
 
         // Emit metrics
         if episode % config.log_interval == 0 {
-            metrics.emit(episode, &agent);
+            metrics.emit(episode, &agent, &world);
         }
     }
 
-    metrics.summary(&agent);
+    metrics.summary(&agent, &world);
 }
 
 fn parse_args() -> M0Config {
@@ -258,6 +290,29 @@ fn parse_args() -> M0Config {
             "--self-model" => {
                 config.self_model_enabled = true;
             }
+            "--goal" => {
+                config.goal_enabled = true;
+            }
+            "--plan" => {
+                config.plan_enabled = true;
+                config.goal_enabled = true; // plan implies goal
+            }
+            "--greedy" => {
+                config.greedy_enabled = true;
+                config.goal_enabled = true; // greedy implies goal
+            }
+            "--plan-depth" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.plan_depth = val.parse().unwrap_or(config.plan_depth);
+                }
+            }
+            "--goal-seed" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.goal_seed = val.parse().unwrap_or(config.goal_seed);
+                }
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -281,6 +336,11 @@ fn parse_args() -> M0Config {
                 println!("  --other-seed N    RNG seed for other agent (default: 137)");
                 println!("  --patrol-period N Steps per patrol phase (default: 5)");
                 println!("  --self-model      Enable reflexive self-model (Stage 5)");
+                println!("  --goal            Enable goal marker on grid (Stage 6)");
+                println!("  --plan            Enable model-based BFS planner (Stage 6, implies --goal)");
+                println!("  --greedy          Enable greedy baseline navigation (Stage 6, implies --goal)");
+                println!("  --plan-depth N    BFS depth for planner (default: 3)");
+                println!("  --goal-seed N     RNG seed for goal placement (default: 271)");
                 std::process::exit(0);
             }
             _ => {}

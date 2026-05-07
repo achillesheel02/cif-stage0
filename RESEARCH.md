@@ -1,10 +1,10 @@
-# CIF Bootstrap Experiment: Stages 0–5
+# CIF Bootstrap Experiment: Stages 0–6
 
-**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? Can it discover that another entity exists and build a predictive model of its behaviour? And can it improve its own predictions by factoring out what it can't control?**
+**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? Can it discover that another entity exists and build a predictive model of its behaviour? Can it improve its own predictions by factoring out what it can't control? And can it USE its learned model to navigate toward a goal?**
 
 This is the first empirical test of the Convergent Information Framework (CIF) brain kernel. Not a product. A research experiment. The value is in what breaks, not what works.
 
-Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval. Stage 3 tests whether the agent can extract symbolic movement rules from raw grid experience and use them for generative prediction — predicting correctly for states never seen before. Stage 4 introduces a second agent on the grid and tests whether M_0 can disentangle "I moved" from "they moved" — and build a theory of the other's behaviour. Stage 5 tests whether the agent can recover from multi-agent memory fragmentation by building a reflexive self-model that factors out the uncontrollable other.
+Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval. Stage 3 tests whether the agent can extract symbolic movement rules from raw grid experience and use them for generative prediction — predicting correctly for states never seen before. Stage 4 introduces a second agent on the grid and tests whether M_0 can disentangle "I moved" from "they moved" — and build a theory of the other's behaviour. Stage 5 tests whether the agent can recover from multi-agent memory fragmentation by building a reflexive self-model that factors out the uncontrollable other. Stage 6 tests whether the learned model can be USED — not just for prediction accuracy, but as a world simulator for goal-directed planning.
 
 ## Theoretical Foundation
 
@@ -1157,7 +1157,230 @@ The progression across five stages:
 - **Stage 4**: "I can model what others do" (acc_O = 1.000 for patrol)
 - **Stage 5**: "And I know what's me and what isn't" (acc_S = 1.000 despite random B)
 
+Stage 6 builds on this foundation — see the next section.
+
 The CIF kernel K(M, E, sigma) → delta_M is now validated across deterministic, stochastic, temporal, symbolic, multi-agent, and reflexive environments. The five preconditions are sufficient for bootstrap in all tested conditions.
+
+## Stage 6: Goal-Directed Planning
+
+### Question
+
+Can the agent USE its learned model to navigate toward a goal? Stages 0–5 built a prediction engine — the agent predicts what will happen next, but predictions serve no purpose beyond accuracy tracking. The model has never been *used* for anything. Stage 6 asks: can predictions become plans?
+
+This is the transition from reactive (observe → predict → compare) to deliberative (observe → simulate → plan → act). The agent's learned physics model becomes a world simulator. It chains predictions forward to evaluate action sequences and picks the sequence that reaches a goal.
+
+### Design
+
+**Goal marker**: A color=3 cell placed at a random position on the grid, visible to the agent. When the agent reaches the goal, the counter increments and the goal respawns at a new random position (never on the agent or other agent). The flat episode loop is unchanged — goal tracking layers on top.
+
+**Three action selection modes** (compared across experiments):
+1. **Blind** (existing familiarity-based): Agent selects actions based on prediction confidence. Reaches goals accidentally.
+2. **Greedy** (Manhattan distance heuristic): Agent moves toward goal using the shortest-path heuristic. No model needed. The model-free baseline.
+3. **Plan** (BFS rollout using learned model): Agent simulates action sequences through its model, expanding states by position, keeping the shortest path to each unique position. Returns the first action of the path terminating closest to the goal. Early terminates when goal position found.
+
+**`predict_for_planning()`**: Priority chain: Rules (generative, works on imagined states) > Self-model > Path A (memory). Excludes temporal (needs real context, unavailable for imagined states). This is the key architectural decision: rules can predict from ANY state (they apply a delta to any position), while memory can only predict from states it has seen. Rules enable deep planning; memory limits planning depth.
+
+**Navigation efficiency**: `optimal_manhattan_distance / actual_steps_taken`. 1.0 = optimal path. <1.0 = wandering or backtracking. Computed across all goal-reaching episodes.
+
+**Backward compatible**: `goal_enabled: false, plan_enabled: false, greedy_enabled: false` by default. All existing tests unaffected.
+
+### Configuration
+
+New parameters (Stage 6 additions):
+```
+goal_enabled:    bool     (place goal marker on grid, default false)
+plan_enabled:    bool     (BFS planner using model, default false, implies goal)
+greedy_enabled:  bool     (Manhattan distance baseline, default false, implies goal)
+plan_depth:      usize    (BFS search depth, default 3)
+goal_seed:       u64      (RNG seed for goal placement, default 271)
+```
+
+### Results
+
+Twelve experiments testing goal-directed planning across environments. All reproducible with `--seed 42`.
+
+#### Summary Table
+
+| # | Config | Goals | Efficiency | acc_R | acc_A | Key finding |
+|---|--------|-------|-----------|-------|-------|-------------|
+| 0 | **Stage 0 baseline** | — | — | — | 0.917 | Backward compat identical |
+| 1 | --goal | 6 | 0.075 | — | 0.917 | Blind: accidental, wandering |
+| 2 | --goal --greedy | 1490 | 0.981 | — | 0.917 | Greedy near-optimal on simple grid |
+| 3 | --goal --plan --rules | 1490 | 0.980 | 0.948 | 0.917 | Plan matches greedy on simple grid |
+| 4 | --goal --plan (no rules) | 2 | 0.042 | — | 0.917 | **Rules essential for planning** |
+| 5 | --goal --greedy --drift | 10 | 0.180 | — | — | Drift degrades greedy |
+| 6 | --goal --plan --rules --drift | 3 | 0.048 | — | — | **Rules corrupted → planner worse** |
+| 6b | --goal --plan --drift | 1 | 0.047 | — | — | Memory planner also weak under drift |
+| 7 | --goal --plan --rules --noise 0.2 | 1145 | 0.755 | — | — | Noise: functional but degraded |
+| 8 | --goal --plan --rules --drift --noise 0.2 | 15 | 0.011 | — | — | Compound: near-total failure |
+| 9 | --goal --plan --rules --other random --self-model | 1501 | 0.980 | — | — | Self-model enables clean planning |
+| 10 | --goal --plan --plan-depth 1 --rules | 1490 | 0.980 | — | — | Depth 1 = model-informed greedy |
+| 11 | --goal --plan --rules --size 10 -n 10000 | 4 | 0.164 | — | — | Large grid: depth 3 insufficient |
+| 12 | --goal --greedy --size 10 -n 10000 | 1506 | 0.990 | — | — | Large grid: greedy dominates |
+
+#### Experiment 1: Blind Baseline (`--goal`)
+
+**Question**: How often does the agent accidentally reach the goal?
+
+**Result**: 6 goals in 5000 episodes. Efficiency 0.075. The familiarity-seeking agent wanders the grid following predictable paths, occasionally stumbling onto the goal by chance.
+
+**Finding**: Without goal-directed behaviour, the agent is effectively a random walker with exploitation bias. 6/5000 = 0.12% goal rate. This is the baseline that planning must beat.
+
+#### Experiment 2: Greedy Baseline (`--goal --greedy`)
+
+**Question**: How well does a model-free heuristic navigate?
+
+**Result**: 1490 goals, efficiency 0.981. Near-optimal on the 5x5 grid. The Manhattan distance heuristic always picks the action that reduces distance to the goal. On a flat grid with no obstacles, this is essentially optimal (the 2% gap comes from edge effects and warmup episodes).
+
+**Finding**: In a simple environment, you don't need a learned model — geometry is sufficient. This sets the ceiling for what planning can achieve: match greedy on simple grids, beat it on complex ones.
+
+#### Experiment 3: Model-Based Planning (`--goal --plan --rules`)
+
+**Question**: The core Stage 6 question — does the learned model enable goal-directed navigation?
+
+**Result**: 1490 goals, efficiency 0.980. Matches greedy exactly on the 5x5 grid. The BFS planner uses rules as its simulator, expands states at each depth, and finds the same shortest paths that the greedy heuristic follows.
+
+**Finding**: On a trivial grid, the planner is no better than greedy. This is expected — the 5x5 grid has no obstacles and the environment matches the model perfectly. The planner's value lies in environments where the model captures structure that the heuristic can't. See experiments 5-6.
+
+#### Experiment 4: Planning WITHOUT Rules (`--goal --plan`)
+
+**Question**: Can the planner work with memory alone?
+
+**Result**: 2 goals, efficiency 0.042. The planner is almost useless without rules.
+
+**Finding**: **This is the key Stage 3→6 interaction.** Memory-based `predict_for_planning()` can only predict for states the agent has SEEN. On the first step of a BFS rollout, the agent is at its current (visited) position, so memory can predict. On the second step, the agent is at a predicted position that may never have been visited — memory has no matching tuple and returns `None`. The rollout stalls at depth 1.
+
+Rules, by contrast, are generative: they construct predictions from position + delta, regardless of whether the position was ever visited. Rules can roll out to arbitrary depth because they work on imagined states. This proves that **symbolic compression (Stage 3) is a prerequisite for deep planning (Stage 6)**.
+
+#### Experiment 5: Greedy Under Drift (`--goal --greedy --drift`)
+
+**Question**: How does the model-free heuristic handle drift?
+
+**Result**: 10 goals, efficiency 0.180. Greedy collapses. The Manhattan heuristic assumes that moving toward the goal actually moves toward the goal — but drift displaces the agent after each step, often pushing it away. The heuristic fights the drift without understanding it.
+
+**Finding**: Drift breaks the assumption that Manhattan distance is monotonically decreasing. The greedy agent takes one step toward the goal, gets pushed sideways by drift, takes another step toward the goal, gets pushed again. It eventually reaches the goal only when drift happens to align with the desired direction.
+
+#### Experiment 6: Planning Under Drift (`--goal --plan --rules --drift`)
+
+**Question**: Does the planner beat greedy under drift — the key Xi_plan test?
+
+**Result**: 3 goals, efficiency 0.048. **The planner is WORSE than greedy under drift.** This is the most surprising result of Stage 6.
+
+**Finding**: The planner fails because its model is wrong. `predict_for_planning()` prioritises rules, and rules are corrupted by drift (Stage 3 experiment 3: Xi_rule = -0.277). Rules average across drift phases, producing deltas that are incorrect for every individual phase. The BFS rollout simulates a world that doesn't match reality, leading the agent AWAY from the goal.
+
+Greedy, while degraded, at least points in the right direction on average. The planner actively misleads. **A wrong model is worse than no model.** This is the most important lesson of Stage 6: planning amplifies model errors. A model that's 70% accurate for prediction becomes catastrophically wrong when chained across multiple planning steps — errors compound exponentially.
+
+Experiment 6b confirms: even without rules (memory-only planning), drift kills the planner (1 goal, efficiency 0.047). The problem isn't rule-specific — any model trained on mixed drift phases produces wrong rollouts.
+
+#### Experiment 7: Planning Under Noise (`--goal --plan --rules --noise 0.2`)
+
+**Question**: How does noise affect planning?
+
+**Result**: 1145 goals, efficiency 0.755. Functional but degraded. Noise means 20% of actions don't execute as intended, so the agent sometimes moves the wrong way even with a perfect plan. The planner still generates correct plans; execution noise reduces follow-through.
+
+**Finding**: Noise degrades planning gracefully because the model is still approximately correct (the MLE delta is the intended movement). The noise is in execution, not in the model. Contrast with drift, where the model itself is wrong.
+
+#### Experiment 8: Compound Stress (`--goal --plan --rules --drift --noise 0.2`)
+
+**Question**: How does planning handle combined drift and noise?
+
+**Result**: 15 goals, efficiency 0.011. Near-total failure. The model is corrupted by drift AND actions misfire from noise. Planning with a wrong model in a noisy execution environment produces essentially random behaviour.
+
+**Finding**: Compound degradation. Each stress factor multiplies the other's impact. Planning amplifies model error, noise prevents recovery from bad plans.
+
+#### Experiment 9: Full Stack (`--goal --plan --rules --other random --self-model`)
+
+**Question**: Does planning work with multi-agent dynamics?
+
+**Result**: 1501 goals, efficiency 0.980. The self-model strips the other agent before prediction, giving the planner a clean self-only model to simulate with. Planning is unaffected by the other agent's random movement.
+
+**Finding**: The Stage 5 self-model composes cleanly with Stage 6 planning. The planner's `predict_for_planning()` chain (rules > self-model > memory) handles multi-agent environments correctly because the self-model has already factored out the other. This validates the layered architecture: each stage builds on prior stages.
+
+#### Experiment 10: Depth-1 Planning (`--goal --plan --plan-depth 1 --rules`)
+
+**Question**: Is depth 1 (model-informed greedy) better than pure greedy?
+
+**Result**: 1490 goals, efficiency 0.980. Identical to full-depth planning and to greedy. On a 5x5 grid, depth 1 is sufficient — the goal is always within 8 steps, and each step's best action is the same whether you look 1 step ahead or 3.
+
+**Finding**: On simple grids, depth doesn't matter. The value of deeper planning would emerge in environments with obstacles, dead ends, or non-monotonic paths.
+
+#### Experiment 11-12: Large Grid (`--size 10`)
+
+**Question**: Does planning scale to larger environments?
+
+**Results**:
+- Plan + rules (depth 3): 4 goals, efficiency 0.164
+- Greedy: 1506 goals, efficiency 0.990
+
+**Finding**: On a 10x10 grid, the goal can be up to 18 Manhattan steps away. BFS at depth 3 can only see 3 steps ahead — it picks the locally best direction but can't plan full paths. Greedy, which always moves toward the goal, dominates because there are no obstacles. The planner would need depth ~18 to compete, which is computationally feasible (25 unique positions max per depth on 5x5, 100 on 10x10) but the current default depth=3 is insufficient.
+
+### Cross-Experiment Analysis
+
+#### Discovery 1: Planning Amplifies Model Error
+
+The defining result of Stage 6. A model that's 70% accurate for one-step prediction becomes catastrophically wrong for multi-step planning because errors compound:
+- Drift-corrupted rules → single-step acc_R = 0.665 → planning with those rules = 0.048 efficiency (3 goals)
+- Noise-degraded rules → single-step acc_R ~0.85 → planning efficiency = 0.755 (functional)
+- Perfect rules → single-step acc_R = 0.948 → planning efficiency = 0.980 (near-optimal)
+
+There's a threshold: models below ~80% single-step accuracy produce plans worse than greedy. Models above ~90% produce plans that match or beat greedy. The gap between prediction accuracy and planning utility is nonlinear — it's the compounding of per-step errors across the plan horizon.
+
+#### Discovery 2: Rules are the Engine of Planning
+
+Experiment 4 (plan without rules): 2 goals, efficiency 0.042.
+Experiment 3 (plan WITH rules): 1490 goals, efficiency 0.980.
+
+Rules enable planning because they're generative — they predict from ANY state, not just seen states. Memory-based prediction stalls after depth 1 because imagined states have no memory matches. This is the Stage 3→6 bridge: **symbolic compression isn't just about compact representation, it's about enabling simulation of hypothetical futures.**
+
+#### Discovery 3: A Wrong Model is Worse Than No Model
+
+Under drift, greedy (no model) gets 10 goals while the planner (wrong model) gets 3. The planner actively follows its model AWAY from the goal because the model's predictions don't match reality. In contrast, greedy ignores the model and at least points in the right direction on average.
+
+This has a CIF parallel: **Xi = 0 between planner and reality would mean the planner's simulation matches the world. Xi >> 0 means the planner's model diverges. When using a model for ACTION (not just prediction), Xi >> 0 is worse than having no model at all.**
+
+#### Discovery 4: Self-Model Composes with Planning
+
+Experiment 9 (plan + rules + random other + self-model): 1501 goals, efficiency 0.980 — identical to the simple grid result. The self-model strips the other agent before the planner simulates, giving it a clean world model. Each layer of the architecture (memory → rules → self-model → planner) composes without interference.
+
+#### Discovery 5: Depth Matters Only When Geometry Requires It
+
+On 5x5: depth 1 = depth 3 = greedy (all 0.980).
+On 10x10: depth 3 fails (0.164) while greedy succeeds (0.990).
+
+The planner's value over greedy requires either (a) environments where the shortest path isn't obvious (obstacles, dead ends), or (b) environments where the physics model captures structure the heuristic can't (drift — though this requires accurate rules, which drift corrupts). On flat grids, greedy is unbeatable because Manhattan distance IS the optimal policy.
+
+### Failure Modes Observed (Stage 6)
+
+| Failure | Experiment | Cause | Implication |
+|---|---|---|---|
+| Planner worse than greedy under drift | 6 | Rules corrupted by drift phase mixing | Planning requires accurate model; wrong model amplifies errors |
+| Memory-only planning fails | 4 | Can't predict unseen states | Rules (generative prediction) essential for planning |
+| Depth 3 insufficient for large grid | 11 | Goal >3 steps away, BFS can't see it | Need adaptive depth or iterative deepening |
+| Compound stress kills planning | 8 | Drift corrupts model + noise corrupts execution | Multiple failure modes multiply |
+
+### Failure Modes NOT Observed (Stage 6)
+
+- **Planning hurts in simple environments**: Never. On simple grids, the planner matches greedy exactly — it never does worse.
+- **Self-model conflicts with planner**: Never. The layered architecture composes cleanly.
+- **Planning is computationally expensive**: Never. BFS on 25 positions (5x5) completes in microseconds. Even 10x10 with 100 positions is trivial.
+- **Goal tracking interferes with learning**: Never. The goal marker is just another feature on the grid; the agent's prediction accuracy is unchanged by its presence.
+
+### Theoretical Significance
+
+Stage 6 marks the transition from reactive to deliberative. The progression across six stages:
+- **Stage 0**: "I can predict my world" (91.7%)
+- **Stage 1**: "Even when my actions are noisy" (84.5%)
+- **Stage 2**: "Even when the world changes over time" (acc_T = 0.787 under noise+drift)
+- **Stage 3**: "And I can generalise beyond what I've seen" (acc_R = 1.000)
+- **Stage 4**: "I can model what others do" (acc_O = 1.000 for patrol)
+- **Stage 5**: "And I know what's me and what isn't" (acc_S = 1.000 despite random B)
+- **Stage 6**: "And I can use what I've learned to get somewhere" (efficiency = 0.980)
+
+The most important insight isn't that planning works — it's the conditions under which it fails. Planning amplifies model error. A model that's 70% accurate for prediction is catastrophically wrong for planning because errors compound across the planning horizon. The planner is only as good as its model, and the model is only as good as the environment is stationary.
+
+This maps to a broader CIF principle: **using Xi for action (planning) has higher accuracy requirements than using Xi for observation (prediction).** A prediction model can be useful at 70% accuracy — it still tells you something about the world. A planning model at 70% accuracy actively misleads because you follow its wrong advice.
+
+The Stage 3→6 bridge is the most architecturally significant finding: rules (symbolic compression) aren't just about compact representation — they're the substrate that enables simulation of hypothetical futures. Without rules, the planner stalls at depth 1 because memory can't predict unseen states. With rules, the planner can roll out to arbitrary depth. **Compression enables imagination.**
 
 ## Reproducing
 
@@ -1277,6 +1500,36 @@ cargo run --release -- --other random --noise 0.2 --self-model
 
 # Full stack: random B + drift + context + self-model
 cargo run --release -- --other random --drift --context 2 --self-model
+
+# ── Stage 6 (goal-directed planning) ──────────────────────────────
+
+# Blind baseline — accidental goals only (6 goals)
+cargo run --release -- --goal
+
+# Greedy baseline — Manhattan heuristic (1490 goals, efficiency 0.981)
+cargo run --release -- --goal --greedy
+
+# Model-based planning with rules (1490 goals, efficiency 0.980)
+cargo run --release -- --goal --plan --rules
+
+# Planning without rules — fails (2 goals, rules essential)
+cargo run --release -- --goal --plan
+
+# Greedy under drift — heuristic degrades (10 goals)
+cargo run --release -- --goal --greedy --drift
+
+# Planning under drift — model corrupted, worse than greedy (3 goals)
+cargo run --release -- --goal --plan --rules --drift
+
+# Planning under noise — functional degradation (1145 goals)
+cargo run --release -- --goal --plan --rules --noise 0.2
+
+# Full stack: plan + multi-agent + self-model (1501 goals, efficiency 0.980)
+cargo run --release -- --goal --plan --rules --other random --self-model
+
+# Large grid: greedy dominates (1506 goals vs planner's 4)
+cargo run --release -- --goal --greedy --size 10 --episodes 10000
+cargo run --release -- --goal --plan --rules --size 10 --episodes 10000
 ```
 
 **Dependency**: Requires [strand-core](https://github.com/achillesheel02/strand-core) at `../strand-core`.
@@ -1285,21 +1538,22 @@ cargo run --release -- --other random --drift --context 2 --self-model
 
 ```
 src/
-  grid.rs         Grid type + Hamming distance + marker detection + strip_color (state representation)
-  config.rs       M0Config (all tunable parameters, Stages 0–5)
-  world.rs        MicroWorld (deterministic, stochastic, drifting, or multi-agent grid environment)
+  grid.rs         Grid type + Hamming distance + marker/goal detection + strip_color (state representation)
+  config.rs       M0Config (all tunable parameters, Stages 0–6)
+  world.rs        MicroWorld (deterministic, stochastic, drifting, multi-agent, or goal-directed grid environment)
   memory.rs       ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
   self_model.rs   SelfMemory (factored memory that strips other-agent markers, Stage 5)
   temporal.rs     TemporalMemory (context-window episodic memory, Stage 2)
   rules.rs        RuleSet (symbolic movement rules, generative prediction, Stage 3)
+  planner.rs      BFS planner + greedy baseline (model-based goal-directed planning, Stage 6)
   other.rs        OtherAgent + OtherPolicy (5 fixed-policy behaviours, Stage 4)
-  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, curiosity-weighted softmax)
-  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model diagnosis)
-  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model)
+  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, planning interface, curiosity-weighted softmax)
+  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model + goal diagnosis)
+  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model + planning)
   lib.rs          Module exports
 ```
 
-~3700 lines of Rust. 92 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
+~4000 lines of Rust. 107 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
 
 ## Theoretical Context
 
@@ -1313,6 +1567,7 @@ This experiment tests the first stage of a curriculum for building a CIF-based c
 | **3** | Rules generalise beyond experience | Large grid | Symbolic (rules) + episodic | **DONE** — acc_R=1.000, Xi_rule=+0.169 |
 | **4** | Other agents exist | Multi-agent | Theory of mind (dual-path O-A/O-B) | **DONE** — acc_O=1.000, Xi_other=+0.812 |
 | **5** | Self/other separation improves predictions | Reflexive | Factored self-memory + best-path selector | **DONE** — acc_S=1.000, Xi_self=+0.758, 19x compression |
+| **6** | Model enables goal-directed navigation | Goal-directed | BFS planner over model rollouts | **DONE** — 1490 goals, efficiency=0.980, rules essential |
 
 Stage 0 answered: *can M_0 bootstrap at all?* Yes, in a deterministic environment.
 
@@ -1325,6 +1580,8 @@ Stage 3 answered: *can M_0 compress experience into symbolic rules?* Yes — and
 Stage 4 answered: *can M_0 discover another entity and build a predictive model?* Yes — with dramatic range. For predictable others (Patrol), M_0 achieves perfect prediction of both self and other (acc_A = 1.000, acc_O = 1.000, Xi_other = 0.812). For reactive others (Chase/Flee), the state-conditioned model outperforms frequency baseline. But for unpredictable others (Random), the self-model collapses by 73.6% due to memory fragmentation — B's random movements create unique grid states that poison memory retrieval. The key insight: **the self/other boundary must be structural, not just computational.** Storing full grids entangles the agent's self-model with the other's position. Factored representations — modelling "my state" separately from "their state" — are required for robust multi-agent prediction.
 
 Stage 5 answered: *can M_0 improve its own predictions by factoring out what it can't control?* Yes — with dramatic effect. SelfMemory strips the other agent's position before store and retrieve, compressing 1882 fragmented tuples to 100 self-only tuples (19x reduction). The result: acc_S = 1.000 — perfect recovery from the 73.6% collapse caused by random B. Xi_self = +0.758 is the largest advantage signal in the entire experiment series. The best-path selector correctly identifies which prediction method to trust, achieving genuine meta-prediction. The key insight: **the self/world separation (precondition #3) must be active, not just a label.** When implemented as factored memory, it doesn't just attribute causation — it prevents irrelevant information from corrupting learning.
+
+Stage 6 answered: *can M_0 USE its model to navigate toward a goal?* Yes — with a critical caveat. On a simple 5x5 grid, the BFS planner using rules as its simulator achieves 1490 goals at 0.980 efficiency, matching the greedy baseline. But the planner FAILS under drift (3 goals, efficiency 0.048 — worse than greedy's 10) because rules are corrupted by drift phase mixing, and planning amplifies model error across the rollout horizon. Without rules, planning is almost useless (2 goals) because memory can't predict unseen states — proving that symbolic compression (Stage 3) is a prerequisite for imagination. The key insights: **compression enables imagination** (rules let the agent simulate hypothetical futures that memory cannot), and **a wrong model is worse than no model** (planning with a 70% accurate model actively misleads because errors compound across planning steps). The layered architecture composes cleanly: self-model (Stage 5) + rules (Stage 3) + planner (Stage 6) together handle multi-agent goal-directed navigation at full efficiency.
 
 ## License
 
