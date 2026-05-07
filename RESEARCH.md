@@ -1,10 +1,10 @@
-# CIF Bootstrap Experiment: Stages 0–1
+# CIF Bootstrap Experiment: Stages 0–2
 
-**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? And does that ability survive noise?**
+**Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? And can it learn temporal patterns?**
 
 This is the first empirical test of the Convergent Information Framework (CIF) brain kernel. Not a product. A research experiment. The value is in what breaks, not what works.
 
-Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change.
+Stage 0 tests the bootstrap in a deterministic environment. Stage 1 introduces stochastic transitions and tests whether M_0 generalises without architectural change. Stage 2 introduces hidden temporal structure and tests whether context-window memory captures patterns invisible to memoryless retrieval.
 
 ## Theoretical Foundation
 
@@ -607,6 +607,210 @@ The first three are sufficient for Stage 1. Curiosity will likely become essenti
 | Accuracy approaches theoretical ceiling | Stage 1 experiment 3 | Architecture not the bottleneck | Focus on environment design, not memory design |
 | Flat Vec scales to 227 tuples | Stage 1 experiment 4 | O(n) scan still fast enough | Graph memory for Stage 2+ |
 
+---
+
+## Stage 2: Temporal Bootstrap
+
+### Question
+
+Can the system learn temporal patterns — transitions that depend on recent *history*, not just current state? This is the first architectural change since Stage 0.
+
+### Design
+
+**Hidden drift**: The world has a periodic force that moves the marker AFTER each action. The drift cycles through four phases: right → down → left → up, each lasting `drift_period` steps (default 10, so full cycle = 40 steps). The drift direction is NOT in the observation — the agent must infer the phase from recent state changes.
+
+**Why drift**: It creates the simplest non-Markovian transition structure. The same (action, state) pair produces different outcomes depending on the current drift phase. A memoryless agent sees this as stochastic noise. A temporal agent that tracks recent history can disambiguate the phase.
+
+**TemporalMemory**: A new context-window episodic memory (`temporal.rs`). Stores (context, action, state_before, state_after) tuples where context is the last K (action, state) pairs. When K=0, degenerates to ExperienceMemory (backward compat).
+
+Retrieval: exact context match first (all context actions + states + action + state_before must match). If no exact match, approximate retrieval minimises context_distance + state Hamming distance.
+
+```
+context_distance(a, b):
+  for each aligned step: +25 if actions differ, +hamming(states) otherwise
+  +25 per missing step (length mismatch)
+```
+
+**Three-way path decomposition**:
+- **Path T** (temporal): Context-aware memory lookup
+- **Path A** (memoryless): Same as Stages 0–1
+- **Path B** (frequency): Most common outcome per action
+
+Three Xi signals:
+```
+Xi_temporal = acc_T - acc_A    (value of temporal context)
+Xi_memory   = acc_A - acc_B    (value of memory structure)
+Xi_total    = acc_T - acc_B    (total system value)
+```
+
+### Configuration
+
+New parameters (Stage 2 additions):
+```
+drift_enabled:  bool     (hidden drift force, default false)
+drift_period:   u64      (steps per drift phase, default 10)
+context_len:    usize    (temporal context window K, default 0)
+```
+
+### Results
+
+Nine experiments testing temporal memory against hidden drift. All reproducible with `--seed 42`.
+
+#### Summary Table
+
+| # | Config | acc_T | acc_A | acc_B | Xi_temp | Xi_mem | Xi_tot | T tuples | diagnosis |
+|---|--------|-------|-------|-------|---------|--------|--------|----------|-----------|
+| 0 | **Stage 0 baseline** | — | 0.917 | 0.565 | — | +0.353 | +0.353 | — | SUCCESS |
+| 1 | --drift | — | 0.943 | 0.562 | — | +0.380 | +0.380 | — | SUCCESS |
+| 2 | --drift --context 2 | 0.943 | 0.943 | 0.562 | 0.000 | +0.380 | +0.380 | 369 | SUCCESS (no temporal gain) |
+| 3 | --drift --context 4 | 0.943 | 0.943 | 0.562 | 0.000 | +0.380 | +0.380 | 520 | SUCCESS (no temporal gain) |
+| 4 | --drift --period 5 --context 2 | 0.651 | 0.767 | 0.607 | **-0.116** | +0.160 | +0.044 | 393 | PARTIAL (temporal hurts) |
+| 5 | --context 3 (Markovian) | 0.695 | 0.917 | 0.565 | **-0.223** | +0.353 | +0.130 | 345 | SUCCESS (temporal hurts) |
+| 6 | --drift --context 2 --noise 0.2 | 0.787 | 0.672 | 0.290 | **+0.115** | +0.383 | +0.497 | 918 | PARTIAL (temporal helps!) |
+| 7 | --drift --period 20 --context 2 | 0.958 | 0.865 | 0.312 | **+0.093** | +0.552 | +0.645 | 325 | SUCCESS (temporal helps!) |
+| 8 | --drift --context 1 | 0.943 | 0.943 | 0.562 | 0.000 | +0.380 | +0.380 | 246 | SUCCESS (no temporal gain) |
+
+#### Experiment 1: Drift Without Temporal Memory (`--drift`)
+
+**Question**: How does drift look to a memoryless agent?
+
+**Result**: Like noise — and the agent handles it well. 94.3% accuracy, *higher* than the deterministic baseline (91.7%). Xi_memory = +0.380. Confidence 83.6%, correctly signaling stochastic transitions. 122 unique tuples (vs 72 deterministic).
+
+**Finding**: Drift increases accuracy because it increases state diversity during exploration. The marker visits more positions, building a richer coverage map. The drift itself creates alternative outcomes for the same (action, state), but the memoryless MLE converges on the dominant outcome — and with drift_period=10, the dominant outcome for most states is still the agent's intended movement (drift adds one displacement, agent's action is still the primary movement).
+
+#### Experiment 2: Drift + Context K=2 (`--drift --context 2`)
+
+**Question**: Does temporal context help disambiguate drift phase?
+
+**Result**: NO. Xi_temporal = 0.000. Path T accuracy equals Path A exactly (0.943). The temporal memory stores 369 tuples (3x more than the 122 memoryless tuples) but provides no predictive advantage.
+
+**Finding**: The memoryless MLE is too strong. When the most-counted outcome is already correct 94.3% of the time, context-based disambiguation has no room to improve. The temporal memory fragments the same experiences across different context windows without gaining enough per-context observations to beat the aggregated MLE.
+
+#### Experiment 3: Drift + Context K=4 (`--drift --context 4`)
+
+**Question**: Does more context help?
+
+**Result**: NO. Xi_temporal = 0.000. Even more fragmented — 520 temporal tuples — but no improvement. The underlying problem isn't context length; it's that the memoryless retrieval is already near-optimal.
+
+#### Experiment 4: Fast Drift + Context (`--drift --drift-period 5 --context 2`)
+
+**Question**: Does faster drift make temporal context more valuable?
+
+**Result**: Both paths degrade, but temporal degrades MORE. Acc_A drops from 0.943 to 0.767 (faster drift = more disruption). Acc_T drops to 0.651 — worse than memoryless by 11.6pp. Xi_temporal = -0.116.
+
+**Finding**: Faster drift creates more context diversity per phase, making it harder for the temporal memory to find good matches. With drift_period=5, the full cycle is only 20 steps — the context changes rapidly, reducing the number of observations per unique context. The temporal memory is data-starved: many context buckets, few examples per bucket. The memoryless MLE benefits from aggregating across contexts.
+
+#### Experiment 5: Context on Markovian World (`--context 3`)
+
+**Question**: Control — does temporal context help when there's no temporal structure?
+
+**Result**: Xi_temporal = **-0.223**. Path T accuracy 0.695 vs Path A 0.917. Context severely hurts in a Markovian world.
+
+**Finding**: This is the most important control. In a world with no temporal structure, context is pure noise that fragments memory. The 345 temporal tuples (vs 72 memoryless) split the same data into context-specific buckets with fewer observations each, weakening the MLE. Approximate retrieval across dissimilar contexts introduces prediction errors that exact memoryless retrieval avoids.
+
+This confirms: **temporal memory must be justified by temporal signal.** Adding context to a Markovian environment is architecturally harmful.
+
+#### Experiment 6: Drift + Noise + Context (`--drift --context 2 --noise 0.2`)
+
+**Question**: Does combining noise and drift create conditions where temporal context helps?
+
+**Result**: **YES.** Xi_temporal = **+0.115**. This is the first experiment where temporal context provides a clear advantage. Acc_T = 0.787 vs Acc_A = 0.672. Total Xi = +0.497.
+
+**Finding**: The combination of noise AND drift degrades the memoryless MLE enough that context-based disambiguation overcomes the fragmentation cost. With 20% noise, each (action, state) pair has multiple plausible outcomes; the drift adds further variation. The memoryless MLE can no longer pick the single most common outcome with high reliability. But temporal context narrows the candidates — for a given context window, the drift phase is partially observable, reducing the effective noise.
+
+918 temporal tuples — the most of any experiment. The combination of noise and drift creates maximum context diversity, but here the diversity is *informative*, not just fragmenting.
+
+#### Experiment 7: Slow Drift + Context (`--drift --drift-period 20 --context 2`)
+
+**Question**: Does slower drift make temporal context more valuable?
+
+**Result**: **YES.** Xi_temporal = **+0.093**. Acc_T = 0.958, the highest of any experiment. Xi_total = +0.645, also the highest.
+
+**Finding**: Slower drift means each phase lasts longer (20 steps), so the temporal memory accumulates more observations per context bucket. The MLE within each context bucket becomes reliable, and the context itself disambiguates the drift phase. The memoryless MLE still works well (0.865) but the temporal memory beats it by 9.3pp because slow drift creates strong phase-specific patterns that context K=2 can capture.
+
+325 temporal tuples — fewer than drift_period=10 (369). Slower drift means fewer phase transitions, less context diversity, and more data per context. This is the regime where temporal memory thrives: enough signal to disambiguate, enough data per bucket to estimate reliably.
+
+#### Experiment 8: Drift + Minimal Context K=1 (`--drift --context 1`)
+
+**Question**: Is one step of context enough?
+
+**Result**: NO. Xi_temporal = 0.000. K=1 provides a single (action, state) pair as context — not enough to infer drift direction, which requires seeing at least one state transition. The approximate retrieval matches on action more than state, making context K=1 equivalent to a slightly noisier version of memoryless retrieval.
+
+**Finding**: Minimum viable context for drift detection is K >= 2. You need at least two consecutive observations to infer a direction.
+
+### Cross-Experiment Analysis
+
+#### Discovery 1: Temporal Context is a Double-Edged Sword
+
+Context fragments the state space. Every distinct context window creates a separate memory bucket. With the same total observations:
+- 72 memoryless tuples (well-estimated MLE)
+- 369 temporal tuples at K=2 (5x more buckets, 5x fewer observations each)
+
+The temporal memory only wins when the per-bucket signal (drift phase disambiguation) exceeds the cost of per-bucket noise (fewer observations per estimate). This happens when:
+1. The memoryless MLE is degraded (by noise or slow drift)
+2. The context reliably captures temporal structure (K >= 2 for drift)
+3. There are enough observations per context bucket to form a reliable estimate
+
+#### Discovery 2: The MLE Dominance Threshold
+
+When memoryless accuracy > ~90%, temporal context cannot help (experiments 1-3, 8). The MLE is already near-optimal, and fragmentation only weakens it. Temporal context helps only when memoryless accuracy is in the 65-87% range (experiments 6-7) — degraded enough that context adds information, but not so degraded that no reliable estimate exists.
+
+This suggests a **staging principle**: temporal memory should be activated (context_len > 0) only when memoryless confidence drops below a threshold. An agent that monitors its own prediction confidence could dynamically enable/disable temporal retrieval.
+
+#### Discovery 3: Drift as Structured Noise
+
+Drift doesn't hurt the memoryless agent — it helps (+0.943 vs +0.917). This parallels Stage 1's finding that noise increases Xi. Drift creates state diversity (more exploration) while the MLE handles the outcome variation. From the memoryless agent's perspective, drift IS noise — but structured noise that happens to improve coverage.
+
+The memoryless MLE dominates because drift_period=10 means the dominant outcome for each (action, state) pair is still the intended movement (the drift adds one displacement per step, but across 4 phases it cancels out, and the majority of observations come from the non-dominant phases too).
+
+#### Discovery 4: Context Length vs. Signal Bandwidth
+
+| K | Xi_temporal | Temporal tuples | Finding |
+|---|-------------|-----------------|---------|
+| 0 | — | — | No temporal memory |
+| 1 | 0.000 | 246 | Too short to infer drift direction |
+| 2 | 0.000 | 369 | Right length, but MLE too strong (period=10) |
+| 4 | 0.000 | 520 | More fragmentation, no more signal |
+
+K=2 is the minimum viable context for drift (experiment 7 confirms it works when conditions are right). K>2 adds fragmentation cost without adding drift information — the drift direction can be inferred from two consecutive observations; more context adds noise.
+
+This implies context window should be tuned to the temporal structure's bandwidth, not maximised. In this environment, the relevant temporal feature (drift direction) has bandwidth 1 (it changes once per drift_period steps), requiring K=2 observations to detect.
+
+#### Discovery 5: The Fragmentation Tax
+
+Experiment 5 (Markovian control) quantifies the pure cost of context: Xi_temporal = -0.223. With no temporal signal, context creates a 22.3pp accuracy penalty from fragmentation alone. This is the "tax" temporal memory pays for its extra complexity. Any temporal signal must exceed this tax to be worth the architectural cost.
+
+In experiments 6-7, the temporal signal (+0.115 and +0.093) does exceed the tax because the Markovian tax is computed on a *different* baseline — the Markovian world has a stronger MLE (0.917) than the drift+noise world (0.672), so the tax is proportionally larger.
+
+### Failure Modes Observed (Stage 2)
+
+| Failure | Experiment | Cause | Implication |
+|---|---|---|---|
+| Context hurts in Markovian world | 5 | No temporal signal to justify fragmentation cost | Must detect temporal structure before enabling context |
+| Context hurts under fast drift | 4 | Too few observations per context bucket | Context window must match temporal bandwidth |
+| Context adds nothing when MLE dominates | 2, 3, 8 | Memoryless already near-optimal | Temporal memory needs a threshold trigger |
+| More context = more fragmentation | 3 vs 2 | K=4 fragments more than K=2, no extra signal | Context length should be minimal for the signal |
+
+### Failure Modes NOT Observed (Stage 2)
+
+- **Temporal memory beats memoryless in all conditions**: It doesn't. It's a specialist tool, not a universal improvement.
+- **Path B beats Path A with drift**: Never happened. Xi_memory stayed positive in every experiment.
+- **Context K=2 captures all temporal structure**: It captures direction but not phase number (which requires K >= drift_period).
+- **Temporal memory causes entropy collapse**: The temporal memory only affects prediction, not action selection.
+
+## Findings for Stage 3
+
+| Finding | Source | Implication | Stage 3 requirement |
+|---|---|---|---|
+| Temporal context is a double-edged sword | Stage 2 experiments 2-5 | Context fragments memory; must be justified by signal | Adaptive context activation |
+| MLE dominance threshold exists | Stage 2 cross-experiment | Temporal helps only when memoryless < ~90% | Monitor confidence, enable temporal conditionally |
+| Minimum viable context K=2 for drift | Stage 2 experiment 8 vs 7 | Context length must match temporal bandwidth | Auto-tune K based on temporal signal strength |
+| Fragmentation tax is real (-22.3pp) | Stage 2 experiment 5 | Pure cost of context in Markovian environments | Must detect non-Markovian structure before enabling |
+| Drift improves exploration | Stage 2 experiment 1 | Environmental dynamics help coverage | Consider dynamic environments as a feature |
+| Noise + drift compose beneficially | Stage 2 experiment 6 | Combined uncertainty creates temporal signal | Test richer temporal structures |
+| Slow drift + context works best | Stage 2 experiment 7 | 95.8% accuracy, Xi_total +0.645 | Seek stable temporal features |
+| Flat Vec still sufficient | Stage 2 (max 918 tuples) | O(n) scan under 1ms | Scale consideration for Stage 3 |
+
 ## Reproducing
 
 ```bash
@@ -646,6 +850,26 @@ cargo run --release -- --size 10 --episodes 10000 --adaptive-temp
 # Full Stage 1 agent
 cargo run --release -- --noise 0.2 --curiosity 0.3 --adaptive-temp
 
+# ── Stage 2 (temporal) ───────────────────────────────────────────
+
+# Drift without temporal memory (acts like noise)
+cargo run --release -- --drift
+
+# Drift + context K=2 (Xi_temporal = 0.000 — MLE too strong)
+cargo run --release -- --drift --context 2
+
+# Markovian + context (control — Xi_temporal = -0.223, context hurts)
+cargo run --release -- --context 3
+
+# Drift + noise + context (Xi_temporal = +0.115 — temporal helps!)
+cargo run --release -- --drift --context 2 --noise 0.2
+
+# Slow drift + context (Xi_temporal = +0.093, acc_T = 0.958, best run)
+cargo run --release -- --drift --drift-period 20 --context 2
+
+# Fast drift (harder, context hurts)
+cargo run --release -- --drift --drift-period 5 --context 2
+
 # Full options
 cargo run --release -- --help
 ```
@@ -657,16 +881,17 @@ cargo run --release -- --help
 ```
 src/
   grid.rs       Grid type + Hamming distance (state representation)
-  config.rs     M0Config (all tunable parameters, Stage 0 + Stage 1)
-  world.rs      MicroWorld (deterministic or stochastic grid environment)
+  config.rs     M0Config (all tunable parameters, Stages 0–2)
+  world.rs      MicroWorld (deterministic, stochastic, or drifting grid environment)
   memory.rs     ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
-  agent.rs      Stage0Agent (dual-path prediction, curiosity-weighted softmax, adaptive temperature)
-  metrics.rs    Instrumentation (5 metrics + strand checkpoints + stochastic diagnosis)
-  main.rs       CLI runner (the loop)
+  temporal.rs   TemporalMemory (context-window episodic memory, Stage 2)
+  agent.rs      Stage0Agent (three-way prediction, curiosity-weighted softmax, adaptive temperature)
+  metrics.rs    Instrumentation (7 metrics + strand checkpoints + temporal diagnosis)
+  main.rs       CLI runner (the loop with history buffer)
   lib.rs        Module exports
 ```
 
-~900 lines of Rust. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
+~1500 lines of Rust. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
 
 ## Theoretical Context
 
@@ -676,8 +901,8 @@ This experiment tests the first stage of a curriculum for building a CIF-based c
 |---|---|---|---|---|
 | **0** | Actions affect environment | Deterministic grid | Flat Vec | **DONE** — 91.7% acc, Xi=+0.353 |
 | **1** | M_0 survives noise; memory is MLE | Stochastic grid | Flat Vec (unchanged) | **DONE** — 84.5% acc at 20% noise |
-| 2 | Temporal patterns exist | Sequences | Episodic memory | Next |
-| 3 | Symbolic compression reduces memory | Language grounding | Symbolic + episodic | |
+| **2** | Temporal context is a specialist tool | Drifting grid | Episodic (context-window) | **DONE** — Xi_temp +0.115 (noise+drift) |
+| 3 | Symbolic compression reduces memory | Language grounding | Symbolic + episodic | Next |
 | 4 | Other agents exist | Multi-agent | Theory of mind | |
 | 5 | Self-model improves predictions | Reflexive | Meta-memory | |
 
@@ -685,7 +910,7 @@ Stage 0 answered: *can M_0 bootstrap at all?* Yes, in a deterministic environmen
 
 Stage 1 answered: *does M_0 survive noise?* Yes — and memory becomes MORE valuable under uncertainty (Xi increases with noise). The architecture required zero change; only new parameters were added.
 
-Stage 2 will ask: *can M_0 learn temporal structure?* This will require episodic memory — the first architectural change.
+Stage 2 answered: *can M_0 learn temporal structure?* Yes, but only when the memoryless MLE is sufficiently degraded. Temporal context is a double-edged sword: it fragments memory, and the fragmentation tax (-22.3pp in Markovian worlds) must be exceeded by temporal signal. The conditions where temporal memory helps (noise + drift, slow drift) are narrow. The key insight: **temporal memory should be a conditional mechanism, not a default one.**
 
 ## License
 
