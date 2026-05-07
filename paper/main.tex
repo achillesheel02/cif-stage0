@@ -1,0 +1,442 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{microtype}
+
+% --- Hyperlink style ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+    urlcolor=blue!60!black,
+}
+
+% --- Code listing style ---
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=none,
+    xleftmargin=1em,
+    framexleftmargin=0.5em,
+}
+
+% --- Custom commands ---
+% \Xi is already defined in amsmath — use it directly
+
+% --- Title ---
+\title{%
+    \textbf{Bootstrap from Nothing:}\\[0.3em]
+    \Large Five Preconditions for Prediction Without Reward\\[0.3em]
+    \large CIF Stage 0 Experiment Report
+}
+
+\author{
+    Barak Achillah Asidi\textsuperscript{1} \and
+    Claude Pro Max (B)\textsuperscript{2}
+    \\[0.5em]
+    \textsuperscript{1}CIF AI \quad
+    \textsuperscript{2}Anthropic (Claude Opus 4.6)
+    \\[0.3em]
+    \small\texttt{barak@thexi.dev}
+}
+
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+\begin{abstract}
+We present Stage~0 of the Convergent Information Framework (CIF) brain kernel: the smallest experiment that tests whether a system can bootstrap from zero knowledge to accurate environmental prediction using only five built-in preconditions and no reward signal. The system---a memory-based agent in a deterministic 5$\times$5 grid world---achieves 91.7\% prediction accuracy (baseline) and 100\% under optimal exploration, using dual-path convergence to measure the value of structured memory over frequency counting. Eight ablation studies reveal that temperature (the exploration--exploitation tradeoff) is the single most load-bearing parameter, that the predictability-seeking goal attractor trades exploration for exploitation, and that degenerate convergence (entropy death) is reproducibly triggered by removing the warmup phase under greedy action selection. All five preconditions are confirmed sufficient for deterministic, discrete, single-agent environments. The 8.3\% accuracy gap in the baseline is shown to be a coverage problem, not an architectural one. Code and data are publicly available.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+
+Every learning system faces a cold-start problem. Before the first experience, the system must already contain enough structure for that experience to be meaningful. Neural networks initialise weights randomly. Reinforcement learning agents explore via epsilon-greedy policies with external reward signals. Biological organisms are born with reflexes, instincts, and genetically specified neural architecture.
+
+The Convergent Information Framework (CIF) proposes a different approach: a kernel that transforms raw experience into structured memory without reward, weights, or backpropagation. The kernel equation is:
+
+\begin{equation}
+    K(M, E, \sigma) \rightarrow \Delta M
+    \label{eq:kernel}
+\end{equation}
+
+\noindent where $M$ is memory (structured experience), $E$ is environment (observations, actions, outcomes), $\sigma$ is a selection function (what to attend to, what to predict), and $\Delta M$ is the memory update. The question this paper addresses is: \textbf{what must $M$ contain before the first experience for this loop to bootstrap at all?}
+
+We hypothesise five preconditions, collectively termed $M_0$:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Distinction primitives}---the ability to tell two states apart.
+    \item \textbf{Signal/noise prior}---detecting that ``something changed'' is worth attending to.
+    \item \textbf{Self/world tag}---attribution: ``I caused this.''
+    \item \textbf{Dimensional scaffold}---register events (D1) and predict next state (D6).
+    \item \textbf{Goal attractor}---seek states where predictions match reality.
+\end{enumerate}
+
+\noindent Note what is absent: no reward signal, no value function, no neural network, no gradient descent, no pre-trained embeddings. The system's only drive is to minimise prediction error---to be less surprised.
+
+This paper reports Stage~0 of a six-stage curriculum. Stage~0 asks the simplest possible question: in a deterministic, fully observable, single-agent environment with discrete states, \textit{can $M_0$ bootstrap prediction from nothing?}
+
+\subsection{Contributions}
+
+\begin{itemize}[nosep]
+    \item Empirical confirmation that five preconditions are sufficient for bootstrap in a deterministic grid world, achieving 91.7\% accuracy (baseline) and 100\% (optimal exploration).
+    \item A dual-path prediction architecture where the gap $\Xi = \text{accuracy}_A - \text{accuracy}_B$ measures the value of structured memory over frequency counting.
+    \item Eight ablation studies identifying temperature as the most load-bearing parameter and documenting three operational regimes (degenerate, functional, optimal).
+    \item Identification of the exploration--exploitation tradeoff as the primary bottleneck for scaling, not memory architecture.
+    \item Reproducible, open-source implementation in ${\sim}600$ lines of Rust.
+\end{itemize}
+
+% ============================================================
+\section{Related Work}
+
+\textbf{Intrinsic motivation and curiosity.} Schmidhuber's formal theory of creativity and curiosity~(1991, 2010) proposes that agents should maximise learning progress rather than external reward. Pathak et al.\ (2017) operationalised this as an intrinsic curiosity module using prediction error as reward. Our goal attractor is related but distinct: the agent seeks \textit{predictable} states, not novel ones. This produces a different behavioural signature---consolidation rather than exploration---which our ablations show is both a strength (rapid convergence) and a limitation (incomplete coverage).
+
+\textbf{Predictive processing.} Clark (2013) and Friston's active inference framework (2010) propose that organisms minimise prediction error (free energy) as their primary objective. CIF shares this predictive orientation but differs in architecture: rather than a generative model with variational inference, CIF uses discrete memory retrieval with dual-path validation. The dual-path structure provides an explicit measure of memory value ($\Xi$) that active inference lacks.
+
+\textbf{Nearest-neighbour and instance-based learning.} Cover and Hart (1967) established that $k$-nearest-neighbour classification achieves error rates bounded by twice the Bayes rate as $n \rightarrow \infty$. Our Path~A retrieval is a 1-nearest-neighbour lookup with Hamming distance. The simplicity is deliberate: Stage~0 tests whether \textit{any} structured retrieval suffices, not whether it is optimal.
+
+\textbf{Dual-process theories.} Kahneman's System 1/System 2 distinction (2011) posits fast (associative) and slow (deliberative) cognitive processes. Our dual paths are not analogous to these---both Path~A and Path~B are ``fast'' retrieval mechanisms. The dual-path structure serves a different purpose: measuring whether context-dependent memory (Path~A) adds value over context-free frequency counting (Path~B).
+
+% ============================================================
+\section{Methods}
+
+\subsection{Environment: MicroWorld}
+
+The environment is a $5 \times 5$ grid. One cell (the ``marker'') has value 1; all others have value 0. The state space is the set of all 25 possible marker positions. Four actions are available: up, down, left, right. Transitions are deterministic. At edges, actions are clamped (no-op rather than wrapping).
+
+The state space has $|S| = 25$ states and $|A| = 4$ actions, yielding $|S| \times |A| = 100$ state-action pairs. Of these, 16 involve edge-clamping (producing no state change), and 84 produce a unique next state. The environment is fully observable, stationary, and Markov.
+
+\subsection{Memory: ExperienceMemory}
+
+Memory $M$ is a list of experience tuples $(a, s_\text{before}, s_\text{after}, c, \text{self})$, where $a$ is the action, $s_\text{before}$ and $s_\text{after}$ are grid states, $c$ is the occurrence count, and self is a causal attribution flag (always true in Stage~0).
+
+\textbf{Write policy.} On each store operation, if an exact match on $(a, s_\text{before}, s_\text{after})$ exists, increment $c$. Otherwise, append a new tuple with $c = 1$. This implements lossless compression: 5000 experiences map to 72 unique tuples (baseline).
+
+\textbf{Read policy.} Given query $(a, s_\text{before})$:
+\begin{enumerate}[nosep]
+    \item \textit{Exact match}: Find all tuples with matching $a$ and $s_\text{before}$; return $s_\text{after}$ of the highest-count match.
+    \item \textit{Approximate match}: Find the tuple with matching $a$ and minimum Hamming distance on $s_\text{before}$; return its $s_\text{after}$.
+    \item \textit{None}: No tuples with action $a$ exist.
+\end{enumerate}
+
+The Hamming distance between two grids $g_1, g_2$ of equal dimensions is:
+\begin{equation}
+    d_H(g_1, g_2) = \sum_{i,j} \mathbb{1}[g_1(i,j) \neq g_2(i,j)]
+\end{equation}
+
+\subsection{Dual-Path Prediction}
+
+Every episode produces two predictions before the agent observes the outcome:
+
+\textbf{Path~A (memory-based).} Nearest-neighbour lookup: given current state $s$ and selected action $a$, retrieve the predicted next state $\hat{s}_A$ from memory using the exact-then-approximate read policy.
+
+\textbf{Path~B (frequency-based).} Most common outcome: for action $a$, return the $s_\text{after}$ with the highest total count across all tuples with that action, ignoring $s_\text{before}$.
+
+After observing the actual next state $s'$, both predictions are scored:
+\begin{align}
+    \text{hit}_A &= \mathbb{1}[\hat{s}_A = s'] \\
+    \text{hit}_B &= \mathbb{1}[\hat{s}_B = s']
+\end{align}
+
+The convergence signal is computed over rolling windows of the last $W = 100$ episodes per action:
+\begin{equation}
+    \Xi = \text{accuracy}_A - \text{accuracy}_B
+    \label{eq:xi}
+\end{equation}
+
+When $\Xi > 0$, structured memory (knowing where you are) helps. When $\Xi < 0$, memory structure hurts. When $\Xi = 0$, context adds nothing over counting.
+
+\subsection{Action Selection}
+
+\textbf{Warmup phase} (episodes $< T_w = 100$): uniform random selection, $a \sim \text{Uniform}(0, |A|-1)$.
+
+\textbf{Post-warmup phase}: softmax over familiarity scores with decaying temperature. For each action $a$, compute:
+\begin{equation}
+    f_a = \ln\!\big(\text{familiarity}(a, s) + 1\big)
+\end{equation}
+where $\text{familiarity}(a, s)$ is the total count of tuples matching $(a, s)$ in memory. The probability of selecting action $a$ is:
+\begin{equation}
+    P(a \mid s) = \frac{\exp(f_a / \tau)}{\sum_{a'} \exp(f_{a'} / \tau)}
+    \label{eq:softmax}
+\end{equation}
+where temperature $\tau$ starts at $\tau_0 = 2.0$ and decays per episode: $\tau_{t+1} = \max(0.01,\; \tau_t \cdot 0.995)$.
+
+The Laplace smoothing ($+1$ inside the logarithm) ensures that unseen actions have score $\ln(1) = 0$ rather than $-\infty$.
+
+\subsection{Metrics}
+
+Four metrics are logged every 50 episodes:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Prediction accuracy}: $\text{acc}_A = \sum_a \text{hits}_a / \sum_a \text{trials}_a$ over rolling windows (weighted mean, not average of per-action rates).
+    \item \textbf{Consolidation ratio}: $\rho = |\text{unique tuples}| / \text{total stores}$. Falls from 1.0 (every experience is new) toward the theoretical minimum $|S||A| / T$.
+    \item \textbf{Action entropy}: $H = -\sum_a p_a \ln p_a$, where $p_a$ is the lifetime action frequency. Maximum is $\ln |A| = 1.386$ (uniform).
+    \item \textbf{Path advantage}: $\Xi = \text{acc}_A - \text{acc}_B$ (Equation~\ref{eq:xi}).
+\end{enumerate}
+
+Additionally, \textbf{strand checkpoints} construct a convergence matrix across actions using the strand-core library. Per-action $\Xi$ values are classified by tolerance (converged if $|\Xi_a| < 0.05$, near if $< 0.20$) and the overall gap pattern is classified (none, scattered, column-localised, systematic, block).
+
+\subsection{Configuration}
+
+Unless otherwise stated, all experiments use:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrl}
+\toprule
+Parameter & Value & Purpose \\
+\midrule
+\texttt{world\_size} & 5 & $25$ positions, $100$ state-action pairs \\
+\texttt{n\_actions} & 4 & Up, down, left, right \\
+\texttt{warmup\_episodes} & 100 & Random exploration before biased selection \\
+\texttt{max\_episodes} & 5000 & Total experiment length \\
+\texttt{temperature\_init} & 2.0 & Initial softmax temperature \\
+\texttt{temperature\_decay} & 0.995 & Per-episode multiplicative cooling \\
+\texttt{accuracy\_window} & 100 & Rolling window for accuracy computation \\
+\texttt{seed} & 42 & Deterministic RNG (StdRng) \\
+\bottomrule
+\end{tabular}
+\caption{Default configuration. Each parameter is an ablation target.}
+\label{tab:config}
+\end{table}
+
+% ============================================================
+\section{Results}
+
+\subsection{Baseline Run}
+
+The baseline run (seed=42, default configuration) produces a clear S-shaped learning curve (Table~\ref{tab:baseline}).
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{rrrrrrr}
+\toprule
+Episode & $\text{acc}_A$ & $\text{acc}_B$ & $\rho$ & $H$ & $\Xi$ & $\tau$ \\
+\midrule
+0    & 0.000 & 0.000 & 1.000 & 0.000 & 0.000 & 2.000 \\
+50   & 0.490 & 0.333 & 0.510 & 1.380 & 0.157 & 2.000 \\
+100  & 0.485 & 0.168 & 0.515 & 1.386 & 0.317 & 1.980 \\
+200  & 0.667 & 0.174 & 0.333 & 1.370 & 0.493 & 1.199 \\
+350  & 0.804 & 0.152 & 0.205 & 1.376 & 0.651 & 0.566 \\
+500  & 0.907 & 0.230 & 0.144 & 1.366 & 0.677 & 0.267 \\
+700  & 0.917 & 0.565 & 0.103 & 1.297 & 0.353 & 0.098 \\
+5000 & 0.917 & 0.565 & 0.014 & 0.865 & 0.353 & 0.010 \\
+\bottomrule
+\end{tabular}
+\caption{Baseline trajectory (seed=42). $\text{acc}_A$ = Path A accuracy, $\text{acc}_B$ = Path B accuracy, $\rho$ = consolidation ratio, $H$ = action entropy, $\Xi$ = path advantage, $\tau$ = temperature.}
+\label{tab:baseline}
+\end{table}
+
+\noindent\textbf{Summary statistics:}
+
+\begin{itemize}[nosep]
+    \item Final Path A accuracy: 91.7\%
+    \item Final Path B accuracy: 56.5\%
+    \item Path advantage ($\Xi$): $+$35.3 percentage points
+    \item Unique tuples: 72 out of 100 possible (72\% coverage)
+    \item Consolidation: 69.4$\times$ compression (5000 experiences $\rightarrow$ 72 tuples)
+    \item Strand: 2/4 actions converged, gap class = column-localised
+\end{itemize}
+
+Diagnosis: \textbf{Bootstrap success.} Predictions well above chance ($1/|A| = 25\%$), Path~A $>$ Path~B.
+
+\subsection{The Learning Curve}
+
+The learning curve has three distinct phases:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Warmup} (episodes 0--100): Random exploration. Accuracy reaches ${\sim}49\%$ by episode 50 through incidental exact matches. Entropy near maximum.
+    \item \textbf{Rapid learning} (episodes 100--500): S-curve climb from 49\% to 91\%. Temperature decays from 2.0 to 0.27. The agent fills in its environmental map. Path advantage peaks at $+$70.4pp (episode 450).
+    \item \textbf{Steady state} (episodes 500--5000): Accuracy plateau at 91.7\%. Path~B climbs from 23\% to 56.5\% as the agent's narrowing action distribution makes frequency counting more accurate. Entropy slowly declines.
+\end{enumerate}
+
+\subsection{The 8.3\% Residual}
+
+Path~A saturates at 91.7\%, not 100\%, despite a deterministic environment where the theoretical maximum is 100\%. Two factors contribute:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Incomplete coverage.} 72/100 state-action pairs explored. The predictability-seeking attractor steers the agent away from unfamiliar territory.
+    \item \textbf{Rolling window boundary.} The 100-episode window means states visited long ago but not recently don't contribute to current accuracy, even if the correct prediction exists in memory.
+\end{enumerate}
+
+Ablation~8 ($\tau_0 = 100$) achieves 100\% accuracy with 100/100 coverage, confirming this is a coverage problem, not an architectural one (Section~\ref{sec:ablations}).
+
+\subsection{Path~B Trajectory}
+
+Path~B follows a non-monotonic arc: starts low (16.8\% at episode 100), stays low while the agent explores broadly, then climbs rapidly (to 56.5\%) as the action distribution narrows. This reveals the \textbf{baseline intelligence of frequency counting under non-uniform action selection}. When the agent consistently favours certain actions, the outcome distribution per action concentrates, and ``what usually happens'' becomes a strong predictor. Path~A's value ($\Xi = +35.3$pp) is the margin above this adaptive baseline.
+
+% ============================================================
+\section{Ablation Studies}
+\label{sec:ablations}
+
+We conducted eight ablations, each changing one parameter from the baseline.
+
+\subsection{Summary}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrrrl}
+\toprule
+Ablation & $\text{acc}_A$ & $\text{acc}_B$ & $\Xi$ & $H$ & Tuples & Diagnosis \\
+\midrule
+Baseline (seed=42) & 0.917 & 0.565 & +0.353 & 0.865 & 72/100 & Success \\
+1.~No warmup & 0.890 & 0.618 & +0.272 & 0.210 & 45/100 & Success (degraded) \\
+2.~Size $3\times3$ & 0.995 & 0.525 & +0.470 & 1.117 & 36/36 & Success (trivial) \\
+3.~Size $10\times10$ & 0.675 & 0.336 & +0.339 & 0.155 & 163/400 & Partial \\
+4.~Greedy ($\tau_0\!=\!0.1$) & 0.901 & 0.837 & +0.063 & 0.751 & 52/100 & Success (low $\Xi$) \\
+5.~Seed 99 & 0.954 & 0.646 & +0.309 & 0.897 & 75/100 & Success \\
+6.~Seed 7 & 0.922 & 0.412 & +0.509 & 0.312 & 76/100 & Success \\
+7.~No warmup + greedy & 1.000 & 1.000 & 0.000 & 0.000 & 3/100 & Degenerate \\
+8.~High temp ($\tau_0\!=\!100$) & 1.000 & 0.405 & +0.595 & 0.709 & 100/100 & Success (best) \\
+\bottomrule
+\end{tabular}
+\caption{Ablation summary. $H$ = final action entropy, Tuples = unique/possible.}
+\label{tab:ablations}
+\end{table}
+
+\subsection{Three Regimes}
+
+The ablations reveal three qualitatively distinct operational regimes:
+
+\textbf{Regime~1: Degenerate} (Ablation~7). Entropy = 0 from episode 50 onward. Three unique tuples from 5000 episodes. The agent found a single action at a single state, repeated it, and achieved ``100\% accuracy'' on both paths---because there is only one thing to predict. $\Xi = 0$ not because the paths converged on truth, but because they converged on trivial. This is \textit{consensus hallucination}: the paths are not independent because they both observe the same three data points.
+
+\textbf{Regime~2: Functional} (Baseline, Ablations~1, 4, 5, 6). Entropy 0.2--0.9, coverage 45--76\%, $\Xi$ 0.06--0.51. Path~A significantly beats Path~B. The system builds a partial but useful model of its environment.
+
+\textbf{Regime~3: Optimal} (Ablation~8). Coverage = 100\%, $\text{acc}_A = 1.000$, $\Xi = +0.595$. Maximum exploration before exploitation produces the best result on every metric except convergence speed (reaches 100\% at episode ${\sim}1200$ vs.\ 91.7\% at episode ${\sim}500$ for baseline).
+
+\subsection{Ablation 3: Scaling ($10 \times 10$ World)}
+
+The most informative failure. The agent achieves only 67.5\% accuracy with 163/400 state-action pairs explored (41\% coverage). Critically, the system plateaus at episode ${\sim}500$ and makes \textit{zero additional progress} over the remaining 9500 episodes. The temperature decay rate (0.995/episode) was tuned for a $5 \times 5$ world; in a $10 \times 10$ world, the agent is locked into exploitation before it has built sufficient coverage. This is a hyperparameter problem, not an architectural one---the same memory system achieves 100\% accuracy under adequate exploration (Ablation~8).
+
+\subsection{Ablation 4: Greedy ($\tau_0 = 0.1$)}
+
+Path~A reaches 90.1\%, but $\Xi$ collapses to just $+$6.3pp. Path~B achieves 83.7\%---nearly as good as Path~A. When the agent strongly prefers certain actions, frequency counting becomes almost as powerful as contextual memory. This reveals a deep tradeoff: \textbf{greedy action selection makes the environment appear simpler than it is.} Memory's comparative advantage requires diverse experience.
+
+\subsection{Ablation 7: Degenerate Convergence}
+
+No warmup and $\tau_0 = 0.1$ produces entropy death by episode 50. The agent discovers one predictable (state, action) pair on its first step, immediately exploits it (the low temperature amplifies any familiarity difference), and never explores further. Both paths converge to the same prediction because the data is trivially small. The Frobenius norm is 0.000 and the gap classification is ``none''---superficially perfect convergence, but vacuous.
+
+This ablation demonstrates that $\Xi = 0$ is necessary but \textbf{not sufficient} for genuine convergence. Path independence must be verified: are the paths drawing on different evidence, or are they both looking at the same three data points?
+
+\subsection{Seed Robustness}
+
+Three seeds (42, 99, 7) all produce bootstrap success with $\text{acc}_A \in [0.917, 0.954]$ and $\Xi \in [0.309, 0.509]$. The system is robust to initialisation. Seeds produce different ``personalities'' (entropy/exploitation profiles) but consistent architectural conclusions.
+
+% ============================================================
+\section{Discussion}
+
+\subsection{Temperature is the Most Load-Bearing Parameter}
+
+Across all eight ablations, temperature controls the exploration--exploitation--coverage chain. High initial temperature (Ablation~8) produces maximum coverage and maximum accuracy. Low temperature (Ablation~4) produces high accuracy but collapses $\Xi$. Zero warmup with low temperature (Ablation~7) produces entropy death. The temperature decay rate determines at what point the agent transitions from building its environmental map to exploiting it---and this transition point does not scale automatically with world size (Ablation~3).
+
+\subsection{The Exploration--Exploitation Tradeoff is the Primary Bottleneck}
+
+The $M_0$ architecture---flat memory, Hamming similarity, dedup\-lication, nearest-neighbour retrieval---is \textit{not} the bottleneck. Under sufficient exploration, it achieves 100\% accuracy on all 100 state-action pairs (Ablation~8). The real bottleneck is the exploration schedule: how long does the agent explore before exploiting?
+
+In biological terms: a newborn's random movements are not wasted motion. They build the coverage map that later deliberate movement exploits. The warmup phase serves the same function. Removing it (Ablation~7) is analogous to a system that attempts deliberate action before it has built a model of its environment.
+
+\subsection{Predictability-Seeking is Correct but Insufficient}
+
+The goal attractor (seek predictable states) is the right bootstrap drive. It produces rapid convergence once the agent has built initial coverage. But it actively suppresses further exploration, creating a coverage ceiling. In the baseline, this ceiling is 72/100 (72\%). The agent prefers known territory.
+
+Stage~1 will require a curiosity mechanism---a term in the goal attractor that rewards visiting \textit{novel} states, not just predictable ones. The CIF framework naturally accommodates this: the selection function $\sigma$ in Equation~\ref{eq:kernel} can be extended to balance predictability and novelty.
+
+\subsection{Consensus Hallucination}
+
+Ablation~7 demonstrates a failure mode with implications beyond this experiment. Two paths that both observe the same small dataset will agree---$\Xi = 0$---without providing genuine validation. This is the convergence analogue of overfitting: the paths are not independent because they share the same evidence base.
+
+The diagnostic implication is that $\Xi = 0$ should always be accompanied by a coverage check. In the CIF framework, this maps to verifying path independence: are Path~A and Path~B drawing on structurally different evidence, or are they merely different views of the same data?
+
+\subsection{Implications for the CIF Curriculum}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{4.2cm}p{3.2cm}p{4.8cm}}
+\toprule
+Finding & Source & Stage~1 Requirement \\
+\midrule
+$M_0$ sufficient for deterministic grid & Baseline + 5 ablations & Maintain all five preconditions \\
+Full exploration $\rightarrow$ 100\% accuracy & Ablation~8 & Add curiosity mechanism \\
+Temp.\ doesn't scale with world size & Ablation~3 & Adaptive temperature \\
+No warmup + greedy = entropy death & Ablation~7 & Mandatory warmup or curiosity \\
+Narrow actions collapse $\Xi$ & Ablation~4 & Ensure diverse experience \\
+$\Xi = 0$ can mean trivial & Ablation~7 & Verify path independence \\
+Hamming distance sufficient for binary grids & All ablations & Embedding similarity for continuous states \\
+Flat Vec scales to 100 tuples & Ablation~8 & Indexed memory for larger spaces \\
+\bottomrule
+\end{tabular}
+\caption{Findings and their implications for Stage~1 (stochastic environments).}
+\label{tab:findings}
+\end{table}
+
+\subsection{Limitations}
+
+This experiment operates under maximal simplification: deterministic transitions, discrete states, full observability, single agent, binary colours, four actions, flat memory. Each of these is a constraint that subsequent stages will relax:
+
+\begin{itemize}[nosep]
+    \item Stage~1: Stochastic transitions (does $M_0$ bootstrap when the environment lies?)
+    \item Stage~2: Temporal sequences (can the system learn order-dependent patterns?)
+    \item Stage~3: Language grounding (can symbolic compression reduce memory requirements?)
+    \item Stage~4: Multi-agent (can the system model other agents?)
+    \item Stage~5: Self-model (can the system model itself?)
+\end{itemize}
+
+The present results establish a baseline: under the simplest conditions, $M_0$ works. The value is in what breaks when each condition is relaxed.
+
+% ============================================================
+\section{Conclusion}
+
+Five preconditions---distinction primitives, signal/noise prior, self/world tagging, dimensional scaffold, and a prediction-accuracy goal attractor---are sufficient to bootstrap environmental prediction from zero knowledge in a deterministic grid world. The system achieves 91.7\% accuracy under default settings and 100\% under optimal exploration, using no reward signal, no neural network, and no gradient descent.
+
+The single most important finding is the role of exploration. Temperature---the exploration--exploitation tradeoff---determines coverage, which determines accuracy. The memory architecture is not the bottleneck; the exploration schedule is. A system that seeks predictability will avoid the unknown. This is simultaneously the bootstrap's greatest strength (rapid convergence on known territory) and its primary limitation (incomplete coverage).
+
+The degenerate case (Ablation~7) provides a cautionary finding about convergence metrics: two paths can agree ($\Xi = 0$) while both observing trivially small data. Path independence must be verified, not assumed.
+
+These results establish the foundation for Stage~1, where stochastic transitions will test whether $M_0$ holds when the environment is no longer deterministic.
+
+% ============================================================
+\section*{Reproducibility}
+
+All code is available at \url{https://github.com/achillesheel02/cif-stage0}. The implementation is ${\sim}600$ lines of Rust. It compiles in $<5$ seconds and runs 5000 episodes in $<100$ms. All ablations can be reproduced with command-line flags:
+
+\begin{lstlisting}
+cargo run --release                        # baseline
+cargo run --release -- --warmup 0          # ablation 1
+cargo run --release -- --size 3 -n 1000    # ablation 2
+cargo run --release -- --size 10 -n 10000  # ablation 3
+cargo run --release -- --temp 0.1          # ablation 4
+cargo run --release -- --seed 99           # ablation 5
+cargo run --release -- --seed 7            # ablation 6
+cargo run --release -- --warmup 0 --temp 0.1  # ablation 7
+cargo run --release -- --temp 100.0        # ablation 8
+\end{lstlisting}
+
+Requires \texttt{strand-core} at \texttt{../strand-core}\\(\url{https://github.com/achillesheel02/strand-core}).
+
+% ============================================================
+\section*{Acknowledgements}
+
+The CIF framework, its dimensional structure (D1--D8), and the convergence identity $\Xi(S, E, t)$ were developed through 1979 sessions of Socratic scaffolding between the authors. The dual-path prediction architecture and $M_0$ curriculum were designed collaboratively in Session~1977.
+
+\end{document}
