@@ -33,6 +33,12 @@ pub struct M0Config {
     pub adaptive_temperature: bool,
     /// Coverage fraction required before temperature decay begins (only if adaptive_temperature).
     pub coverage_gate: f64,
+    /// Enable hidden drift in the world (Stage 2).
+    pub drift_enabled: bool,
+    /// Steps per drift phase. 4 phases = 1 full cycle. Default 10 → 40-step cycle.
+    pub drift_period: u64,
+    /// Temporal context window size K. 0 = no temporal memory (Stage 0/1 compat).
+    pub context_len: usize,
 }
 
 impl Default for M0Config {
@@ -52,6 +58,9 @@ impl Default for M0Config {
             curiosity_weight: 0.0,
             adaptive_temperature: false,
             coverage_gate: 0.5,
+            drift_enabled: false,
+            drift_period: 10,
+            context_len: 0,
         }
     }
 }

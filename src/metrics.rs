@@ -10,12 +10,16 @@ use strand_core::{Config, StrandMatrix};
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub episode: u64,
+    pub accuracy_t: f64,
     pub accuracy: f64,
     pub consolidation: f64,
     pub entropy: f64,
     pub path_advantage: f64,
+    pub xi_temporal: f64,
+    pub xi_total: f64,
     pub temperature: f64,
     pub unique_tuples: usize,
+    pub temporal_tuples: usize,
     pub confidence: f64,
 }
 
@@ -49,21 +53,34 @@ impl Metrics {
     pub fn emit(&mut self, episode: u64, agent: &Stage0Agent) {
         let snap = Snapshot {
             episode,
+            accuracy_t: agent.path_t_accuracy(),
             accuracy: agent.path_a_accuracy(),
             consolidation: agent.consolidation_ratio(),
             entropy: agent.action_entropy(),
             path_advantage: agent.path_advantage(),
+            xi_temporal: agent.temporal_advantage(),
+            xi_total: agent.path_t_accuracy() - agent.path_b_accuracy(),
             temperature: agent.temperature(),
             unique_tuples: agent.memory.unique_count(),
+            temporal_tuples: agent.temporal_memory.unique_count(),
             confidence: agent.avg_prediction_confidence(),
         };
 
         if !self.header_printed {
-            println!(
-                "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
-                "episode", "acc_A", "acc_B", "consol", "entropy", "path_adv", "temp", "conf", "frobenius", "gap"
-            );
-            println!("{}", "-".repeat(100));
+            if agent.config.context_len > 0 {
+                println!(
+                    "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                    "episode", "acc_T", "acc_A", "acc_B", "xi_temp", "xi_mem", "xi_tot",
+                    "consol", "entropy", "temp", "frobenius", "gap"
+                );
+                println!("{}", "-".repeat(120));
+            } else {
+                println!(
+                    "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                    "episode", "acc_A", "acc_B", "consol", "entropy", "path_adv", "temp", "conf", "frobenius", "gap"
+                );
+                println!("{}", "-".repeat(100));
+            }
             self.header_printed = true;
         }
 
@@ -76,19 +93,37 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        println!(
-            "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
-            snap.episode,
-            snap.accuracy,
-            agent.path_b_accuracy(),
-            snap.consolidation,
-            snap.entropy,
-            snap.path_advantage,
-            snap.temperature,
-            snap.confidence,
-            frob_str,
-            gap_str,
-        );
+        if agent.config.context_len > 0 {
+            println!(
+                "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+                snap.episode,
+                snap.accuracy_t,
+                snap.accuracy,
+                agent.path_b_accuracy(),
+                snap.xi_temporal,
+                snap.path_advantage,
+                snap.xi_total,
+                snap.consolidation,
+                snap.entropy,
+                snap.temperature,
+                frob_str,
+                gap_str,
+            );
+        } else {
+            println!(
+                "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+                snap.episode,
+                snap.accuracy,
+                agent.path_b_accuracy(),
+                snap.consolidation,
+                snap.entropy,
+                snap.path_advantage,
+                snap.temperature,
+                snap.confidence,
+                frob_str,
+                gap_str,
+            );
+        }
 
         self.snapshots.push(snap);
     }
@@ -134,13 +169,27 @@ impl Metrics {
 
     /// Print a summary at the end of the run.
     pub fn summary(&self, agent: &Stage0Agent) {
+        let stage_label = if agent.config.context_len > 0 || agent.config.drift_enabled {
+            "STAGE 2 SUMMARY"
+        } else if agent.config.noise > 0.0 || agent.config.curiosity_weight > 0.0 || agent.config.adaptive_temperature {
+            "STAGE 1 SUMMARY"
+        } else {
+            "STAGE 0 SUMMARY"
+        };
         println!("\n{}", "=".repeat(90));
-        println!("STAGE 0 SUMMARY");
+        println!("{}", stage_label);
         println!("{}", "=".repeat(90));
         println!(
             "Total episodes:        {}",
             agent.episode_count
         );
+
+        if agent.config.context_len > 0 {
+            println!(
+                "Final Path T accuracy: {:.3}",
+                agent.path_t_accuracy()
+            );
+        }
         println!(
             "Final Path A accuracy: {:.3}",
             agent.path_a_accuracy()
@@ -149,10 +198,25 @@ impl Metrics {
             "Final Path B accuracy: {:.3}",
             agent.path_b_accuracy()
         );
-        println!(
-            "Path advantage:        {:.3}",
-            agent.path_advantage()
-        );
+        if agent.config.context_len > 0 {
+            println!(
+                "Xi temporal (T-A):     {:.3}",
+                agent.temporal_advantage()
+            );
+            println!(
+                "Xi memory (A-B):       {:.3}",
+                agent.path_advantage()
+            );
+            println!(
+                "Xi total (T-B):        {:.3}",
+                agent.path_t_accuracy() - agent.path_b_accuracy()
+            );
+        } else {
+            println!(
+                "Path advantage:        {:.3}",
+                agent.path_advantage()
+            );
+        }
         println!(
             "Action entropy:        {:.3} (max: {:.3})",
             agent.action_entropy(),
@@ -162,6 +226,12 @@ impl Metrics {
             "Unique tuples:         {}",
             agent.memory.unique_count()
         );
+        if agent.config.context_len > 0 {
+            println!(
+                "Temporal tuples:       {}",
+                agent.temporal_memory.unique_count()
+            );
+        }
         println!(
             "Total stores:          {}",
             agent.memory.total_stores()
@@ -196,7 +266,9 @@ impl Metrics {
 
         if acc > 0.8 && adv > 0.0 {
             println!("  BOOTSTRAP SUCCESS — predictions well above chance, Path A > Path B.");
-            println!("  M_0 is sufficient for this environment. Ready for Stage 1.");
+            if agent.config.context_len == 0 {
+                println!("  M_0 is sufficient for this environment. Ready for Stage 1.");
+            }
         } else if acc > 0.5 && adv > 0.0 {
             println!("  PARTIAL BOOTSTRAP — predictions above chance but not saturated.");
             println!("  Memory structure helps (Path A > B). May need more episodes or richer retrieval.");
@@ -218,6 +290,24 @@ impl Metrics {
             );
             if acc > 0.5 {
                 println!("  Path A accuracy {:.1}% despite noise suggests M_0 generalises.", acc * 100.0);
+            }
+        }
+
+        // Temporal diagnosis
+        if agent.config.context_len > 0 {
+            let xi_t = agent.temporal_advantage();
+            if xi_t > 0.05 && agent.config.drift_enabled {
+                println!(
+                    "  TEMPORAL PATTERN DETECTED — Xi_temporal={:.3}, context K={} captures drift.",
+                    xi_t, agent.config.context_len
+                );
+            }
+            if agent.config.drift_enabled && xi_t < 0.02 {
+                println!("  WARNING: drift present but temporal memory shows no advantage (Xi_temporal={:.3}).", xi_t);
+                println!("  Context window K={} may be too short to infer drift phase.", agent.config.context_len);
+            }
+            if !agent.config.drift_enabled && xi_t > 0.02 {
+                println!("  WARNING: false positive temporal signal (Xi_temporal={:.3}) in Markovian world.", xi_t);
             }
         }
 

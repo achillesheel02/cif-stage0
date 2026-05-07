@@ -14,15 +14,19 @@
 use crate::config::M0Config;
 use crate::grid::Grid;
 use crate::memory::ExperienceMemory;
+use crate::temporal::TemporalMemory;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
 
 pub struct Stage0Agent {
     pub memory: ExperienceMemory,
+    pub temporal_memory: TemporalMemory,
     pub episode_count: u64,
     pub config: M0Config,
     rng: StdRng,
+    /// Per-action rolling accuracy for Path T (temporal context).
+    path_t_hits: Vec<VecDeque<bool>>,
     /// Per-action rolling accuracy for Path A (memory-based).
     path_a_hits: Vec<VecDeque<bool>>,
     /// Per-action rolling accuracy for Path B (frequency-based).
@@ -38,23 +42,36 @@ impl Stage0Agent {
         let rng = StdRng::seed_from_u64(config.seed);
         let window = config.accuracy_window;
         let n = config.n_actions;
+        let context_len = config.context_len;
         Self {
             memory: ExperienceMemory::new(),
+            temporal_memory: TemporalMemory::new(context_len),
             episode_count: 0,
             temperature: config.temperature_init,
             config,
             rng,
+            path_t_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
             path_a_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
             path_b_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
             action_counts: vec![0; n],
         }
     }
 
-    /// Select an action given current state.
+    /// Path T prediction: temporal context-aware memory lookup.
+    /// When context_len=0, delegates to Path A (backward compat).
+    pub fn predict_temporal(&self, action: u8, state: &Grid, context: &[(u8, Grid)]) -> Option<Grid> {
+        if self.config.context_len == 0 {
+            return self.predict_path_a(action, state);
+        }
+        self.temporal_memory.retrieve(context, action, state).cloned()
+    }
+
+    /// Select an action given current state and context.
     ///
     /// Before warmup: uniform random.
     /// After warmup: softmax over familiarity scores (prediction-accuracy seeking).
-    pub fn select_action(&mut self, state: &Grid) -> u8 {
+    /// Context is accepted but not used for action selection (temporal informs prediction, not action choice).
+    pub fn select_action(&mut self, state: &Grid, _context: &[(u8, Grid)]) -> u8 {
         if self.episode_count < self.config.warmup_episodes {
             return self.rng.gen_range(0..self.config.n_actions as u8);
         }
@@ -106,12 +123,16 @@ impl Stage0Agent {
         action: u8,
         state_before: Grid,
         state_after: Grid,
+        path_t_hit: bool,
         path_a_hit: bool,
         path_b_hit: bool,
+        context: &[(u8, Grid)],
     ) {
-        // Store in memory
+        // Store in both memories
         self.memory
-            .store(action, state_before, state_after);
+            .store(action, state_before.clone(), state_after.clone());
+        self.temporal_memory
+            .store(context, action, state_before, state_after);
 
         // Update action count
         let a = action as usize;
@@ -120,6 +141,13 @@ impl Stage0Agent {
 
             // Update rolling accuracy windows
             let window = self.config.accuracy_window;
+
+            let hits_t = &mut self.path_t_hits[a];
+            if hits_t.len() >= window {
+                hits_t.pop_front();
+            }
+            hits_t.push_back(path_t_hit);
+
             let hits_a = &mut self.path_a_hits[a];
             if hits_a.len() >= window {
                 hits_a.pop_front();
@@ -239,9 +267,44 @@ impl Stage0Agent {
         entropy
     }
 
-    /// Path advantage: accuracy_A - accuracy_B.
+    /// Overall Path T accuracy (across all actions, rolling window).
+    pub fn path_t_accuracy(&self) -> f64 {
+        let (hits, total) = self
+            .path_t_hits
+            .iter()
+            .fold((0usize, 0usize), |(h, t), deque| {
+                let deque_hits = deque.iter().filter(|&&b| b).count();
+                (h + deque_hits, t + deque.len())
+            });
+        if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        }
+    }
+
+    /// Per-action Path T accuracy.
+    pub fn path_t_accuracy_per_action(&self) -> Vec<f64> {
+        self.path_t_hits
+            .iter()
+            .map(|deque| {
+                if deque.is_empty() {
+                    0.0
+                } else {
+                    deque.iter().filter(|&&b| b).count() as f64 / deque.len() as f64
+                }
+            })
+            .collect()
+    }
+
+    /// Path advantage: accuracy_A - accuracy_B (memory value).
     pub fn path_advantage(&self) -> f64 {
         self.path_a_accuracy() - self.path_b_accuracy()
+    }
+
+    /// Temporal advantage: accuracy_T - accuracy_A (temporal context value).
+    pub fn temporal_advantage(&self) -> f64 {
+        self.path_t_accuracy() - self.path_a_accuracy()
     }
 
     /// Current temperature.
@@ -285,7 +348,7 @@ mod tests {
         // During warmup, actions should be distributed roughly uniformly
         let mut counts = [0u32; 4];
         for _ in 0..1000 {
-            let a = agent.select_action(&state);
+            let a = agent.select_action(&state, &[]);
             counts[a as usize] += 1;
         }
         // Each action should appear at least 150 times out of 1000
@@ -307,7 +370,7 @@ mod tests {
         let before = Grid::filled(5, 5, 0);
         let after = Grid::filled(5, 5, 0);
 
-        agent.record(0, before.clone(), after.clone(), true, false);
+        agent.record(0, before.clone(), after.clone(), true, true, false, &[]);
         assert!(agent.path_a_accuracy() > 0.0);
         assert_eq!(agent.path_b_accuracy(), 0.0);
     }
@@ -321,7 +384,7 @@ mod tests {
         // Record equal counts for all actions
         for action in 0..4u8 {
             for _ in 0..25 {
-                agent.record(action, state.clone(), after.clone(), false, false);
+                agent.record(action, state.clone(), after.clone(), false, false, false, &[]);
             }
         }
         let entropy = agent.action_entropy();
@@ -337,7 +400,7 @@ mod tests {
 
         // Same experience repeated
         for _ in 0..10 {
-            agent.record(0, before.clone(), after.clone(), true, true);
+            agent.record(0, before.clone(), after.clone(), true, true, true, &[]);
         }
         // 1 unique tuple / 10 total stores = 0.1
         assert!((agent.consolidation_ratio() - 0.1).abs() < 0.01);
@@ -356,7 +419,7 @@ mod tests {
 
         for _ in 0..200 {
             let state = world.observe();
-            let action = agent.select_action(&state);
+            let action = agent.select_action(&state, &[]);
             let pred_a = agent.predict_path_a(action, &state);
             let pred_b = agent.predict_path_b(action);
 
@@ -366,7 +429,7 @@ mod tests {
             let hit_a = pred_a.as_ref() == Some(&actual);
             let hit_b = pred_b.as_ref() == Some(&actual);
 
-            agent.record(action, state, actual, hit_a, hit_b);
+            agent.record(action, state, actual, hit_a, hit_a, hit_b, &[]);
         }
 
         // After 200 episodes in a 5x5 deterministic world,
@@ -395,13 +458,13 @@ mod tests {
         // Build some memory
         for action in 0..4u8 {
             for _ in 0..10 {
-                agent.record(action, state.clone(), after.clone(), false, false);
+                agent.record(action, state.clone(), after.clone(), false, false, false, &[]);
             }
         }
         // All actions have equal familiarity, so with cw=0, distribution should be uniform-ish
         let mut counts = [0u32; 4];
         for _ in 0..400 {
-            let a = agent.select_action(&state);
+            let a = agent.select_action(&state, &[]);
             counts[a as usize] += 1;
         }
         for &c in &counts {
@@ -425,7 +488,7 @@ mod tests {
         let after = Grid::filled(5, 5, 0);
 
         // Record a single tuple — coverage = 1/100 = 0.01 < 0.5
-        agent.record(0, state.clone(), after.clone(), true, true);
+        agent.record(0, state.clone(), after.clone(), true, true, true, &[]);
         // Temperature should NOT have decayed (coverage too low)
         assert!(
             (agent.temperature() - 2.0).abs() < 0.01,
@@ -448,7 +511,7 @@ mod tests {
 
         for _ in 0..500 {
             let state = world.observe();
-            let action = agent.select_action(&state);
+            let action = agent.select_action(&state, &[]);
             let pred_a = agent.predict_path_a(action, &state);
             let pred_b = agent.predict_path_b(action);
 
@@ -458,7 +521,7 @@ mod tests {
             let hit_a = pred_a.as_ref() == Some(&actual);
             let hit_b = pred_b.as_ref() == Some(&actual);
 
-            agent.record(action, state, actual, hit_a, hit_b);
+            agent.record(action, state, actual, hit_a, hit_a, hit_b, &[]);
         }
 
         assert!(
@@ -466,5 +529,52 @@ mod tests {
             "Path A accuracy {} too low with 20% noise after 500 episodes",
             agent.path_a_accuracy()
         );
+    }
+
+    // ── Stage 2 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_context_zero_t_equals_a() {
+        // With context_len=0, Path T should delegate to Path A
+        let config = M0Config {
+            context_len: 0,
+            warmup_episodes: 0,
+            seed: 42,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let before = Grid::filled(5, 5, 0);
+        let mut after = Grid::filled(5, 5, 0);
+        after.set(0, 0, 1);
+
+        agent.record(0, before.clone(), after.clone(), true, true, false, &[]);
+
+        let pred_a = agent.predict_path_a(0, &before);
+        let pred_t = agent.predict_temporal(0, &before, &[]);
+        assert_eq!(pred_a, pred_t);
+    }
+
+    #[test]
+    fn test_three_way_tracking() {
+        let config = M0Config {
+            context_len: 1,
+            warmup_episodes: 0,
+            seed: 42,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+        let after = Grid::filled(5, 5, 0);
+
+        // Record with all three paths having different outcomes
+        agent.record(0, state.clone(), after.clone(), true, false, false, &[]);
+        agent.record(0, state.clone(), after.clone(), false, true, false, &[]);
+        agent.record(0, state.clone(), after.clone(), false, false, true, &[]);
+
+        // path_t: 1/3, path_a: 1/3, path_b: 1/3
+        assert!((agent.path_t_accuracy() - 1.0 / 3.0).abs() < 0.01);
+        assert!((agent.path_a_accuracy() - 1.0 / 3.0).abs() < 0.01);
+        assert!((agent.path_b_accuracy() - 1.0 / 3.0).abs() < 0.01);
+        assert!(agent.temporal_advantage().abs() < 0.01);
     }
 }
