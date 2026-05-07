@@ -16,6 +16,7 @@ pub struct Snapshot {
     pub path_advantage: f64,
     pub temperature: f64,
     pub unique_tuples: usize,
+    pub confidence: f64,
 }
 
 /// A strand checkpoint — dual-path convergence across actions.
@@ -54,14 +55,15 @@ impl Metrics {
             path_advantage: agent.path_advantage(),
             temperature: agent.temperature(),
             unique_tuples: agent.memory.unique_count(),
+            confidence: agent.avg_prediction_confidence(),
         };
 
         if !self.header_printed {
             println!(
-                "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
-                "episode", "acc_A", "acc_B", "consol", "entropy", "path_adv", "temp", "frobenius", "gap"
+                "{:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                "episode", "acc_A", "acc_B", "consol", "entropy", "path_adv", "temp", "conf", "frobenius", "gap"
             );
-            println!("{}", "-".repeat(90));
+            println!("{}", "-".repeat(100));
             self.header_printed = true;
         }
 
@@ -75,7 +77,7 @@ impl Metrics {
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
         println!(
-            "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
+            "{:<8} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
             snap.episode,
             snap.accuracy,
             agent.path_b_accuracy(),
@@ -83,6 +85,7 @@ impl Metrics {
             snap.entropy,
             snap.path_advantage,
             snap.temperature,
+            snap.confidence,
             frob_str,
             gap_str,
         );
@@ -205,6 +208,17 @@ impl Metrics {
         if adv < 0.0 {
             println!("  WARNING: Path B beats Path A — memory structure is worse than frequency.");
             println!("  Retrieval policy may be fundamentally wrong.");
+        }
+
+        let conf = agent.avg_prediction_confidence();
+        if conf < 0.95 {
+            println!(
+                "  STOCHASTIC ENVIRONMENT — avg confidence {:.1}% indicates noisy transitions.",
+                conf * 100.0
+            );
+            if acc > 0.5 {
+                println!("  Path A accuracy {:.1}% despite noise suggests M_0 generalises.", acc * 100.0);
+            }
         }
 
         if ent < max_ent * 0.3 && agent.episode_count < agent.config.warmup_episodes * 2 {

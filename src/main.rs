@@ -17,13 +17,22 @@ use cif_stage0::world::MicroWorld;
 fn main() {
     let config = parse_args();
 
-    println!("CIF Stage 0 — Bootstrap Experiment");
+    let stage = if config.noise > 0.0 || config.curiosity_weight > 0.0 || config.adaptive_temperature {
+        "Stage 1 — Stochastic Bootstrap"
+    } else {
+        "Stage 0 — Bootstrap Experiment"
+    };
+    println!("CIF {} ", stage);
     println!("World: {}x{} | Actions: {} | Episodes: {} | Warmup: {} | Seed: {}",
         config.world_size, config.world_size, config.n_actions,
         config.max_episodes, config.warmup_episodes, config.seed);
+    if config.noise > 0.0 || config.curiosity_weight > 0.0 || config.adaptive_temperature {
+        println!("Noise: {:.2} | Curiosity: {:.2} | Adaptive temp: {} | Coverage gate: {:.2}",
+            config.noise, config.curiosity_weight, config.adaptive_temperature, config.coverage_gate);
+    }
     println!();
 
-    let mut world = MicroWorld::new(config.world_size);
+    let mut world = MicroWorld::with_noise(config.world_size, config.noise, config.seed);
     let mut agent = Stage0Agent::new(config.clone());
     let mut metrics = Metrics::new();
 
@@ -36,7 +45,7 @@ fn main() {
         let pred_b = agent.predict_path_b(action);
 
         // Act
-        world.apply(action);
+        let _executed = world.apply(action);
         let actual = world.observe();
 
         // Score predictions
@@ -103,6 +112,27 @@ fn parse_args() -> M0Config {
                     config.temperature_init = val.parse().unwrap_or(config.temperature_init);
                 }
             }
+            "--noise" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.noise = val.parse().unwrap_or(config.noise);
+                }
+            }
+            "--curiosity" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.curiosity_weight = val.parse().unwrap_or(config.curiosity_weight);
+                }
+            }
+            "--adaptive-temp" => {
+                config.adaptive_temperature = true;
+            }
+            "--coverage-gate" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.coverage_gate = val.parse().unwrap_or(config.coverage_gate);
+                }
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -113,6 +143,10 @@ fn parse_args() -> M0Config {
                 println!("  --seed          RNG seed (default: 42)");
                 println!("  --log-interval  Print metrics every N episodes (default: 50)");
                 println!("  --temp          Initial temperature (default: 2.0)");
+                println!("  --noise         Action noise probability [0.0-1.0] (default: 0.0)");
+                println!("  --curiosity     Curiosity weight [0.0-1.0] (default: 0.0)");
+                println!("  --adaptive-temp Enable coverage-gated temperature decay");
+                println!("  --coverage-gate Coverage fraction before decay starts (default: 0.5)");
                 std::process::exit(0);
             }
             _ => {}

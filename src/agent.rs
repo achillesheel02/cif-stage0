@@ -59,12 +59,13 @@ impl Stage0Agent {
             return self.rng.gen_range(0..self.config.n_actions as u8);
         }
 
-        // Compute familiarity score for each action
+        // Compute score: blend familiarity (exploit) with inverse familiarity (explore)
+        let cw = self.config.curiosity_weight;
         let scores: Vec<f64> = (0..self.config.n_actions)
             .map(|a| {
                 let fam = self.memory.familiarity(a as u8, state);
-                // +1 to avoid zero (Laplace smoothing)
-                (fam as f64 + 1.0).ln()
+                let ln_fam = (fam as f64 + 1.0).ln();
+                (1.0 - cw) * ln_fam + cw * (-ln_fam)
             })
             .collect();
 
@@ -135,8 +136,15 @@ impl Stage0Agent {
         // Decay temperature
         self.episode_count += 1;
         if self.episode_count >= self.config.warmup_episodes {
-            self.temperature *= self.config.temperature_decay;
-            // Floor to prevent temperature from going to zero
+            if self.config.adaptive_temperature {
+                let expected = (self.config.world_size * self.config.world_size * self.config.n_actions) as f64;
+                let coverage = self.memory.unique_count() as f64 / expected;
+                if coverage >= self.config.coverage_gate {
+                    self.temperature *= self.config.temperature_decay;
+                }
+            } else {
+                self.temperature *= self.config.temperature_decay;
+            }
             if self.temperature < 0.01 {
                 self.temperature = 0.01;
             }
@@ -240,6 +248,23 @@ impl Stage0Agent {
     pub fn temperature(&self) -> f64 {
         self.temperature
     }
+
+    /// Average prediction confidence across unique (action, state_before) pairs.
+    pub fn avg_prediction_confidence(&self) -> f64 {
+        let mut seen: Vec<(u8, &Grid)> = Vec::new();
+        let mut sum = 0.0;
+        let mut count = 0usize;
+
+        for tuple in self.memory.iter_tuples() {
+            if !seen.iter().any(|(a, s)| *a == tuple.action && *s == &tuple.state_before) {
+                seen.push((tuple.action, &tuple.state_before));
+                sum += self.memory.prediction_confidence(tuple.action, &tuple.state_before);
+                count += 1;
+            }
+        }
+
+        if count == 0 { 1.0 } else { sum / count as f64 }
+    }
 }
 
 #[cfg(test)]
@@ -335,7 +360,7 @@ mod tests {
             let pred_a = agent.predict_path_a(action, &state);
             let pred_b = agent.predict_path_b(action);
 
-            world.apply(action);
+            let _ = world.apply(action);
             let actual = world.observe();
 
             let hit_a = pred_a.as_ref() == Some(&actual);
@@ -349,6 +374,96 @@ mod tests {
         assert!(
             agent.path_a_accuracy() > 0.3,
             "Path A accuracy {} too low after 200 episodes",
+            agent.path_a_accuracy()
+        );
+    }
+
+    // ── Stage 1 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_curiosity_zero_matches_stage0() {
+        // curiosity_weight=0 should produce identical scores to Stage 0
+        let config = M0Config {
+            curiosity_weight: 0.0,
+            warmup_episodes: 0,
+            seed: 42,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+        let after = Grid::filled(5, 5, 0);
+        // Build some memory
+        for action in 0..4u8 {
+            for _ in 0..10 {
+                agent.record(action, state.clone(), after.clone(), false, false);
+            }
+        }
+        // All actions have equal familiarity, so with cw=0, distribution should be uniform-ish
+        let mut counts = [0u32; 4];
+        for _ in 0..400 {
+            let a = agent.select_action(&state);
+            counts[a as usize] += 1;
+        }
+        for &c in &counts {
+            assert!(c > 50, "cw=0 action count {} too low for uniform-ish", c);
+        }
+    }
+
+    #[test]
+    fn test_adaptive_temp_gates_on_coverage() {
+        let config = M0Config {
+            adaptive_temperature: true,
+            coverage_gate: 0.5,
+            warmup_episodes: 0,
+            temperature_init: 2.0,
+            temperature_decay: 0.99,
+            seed: 42,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+        let after = Grid::filled(5, 5, 0);
+
+        // Record a single tuple — coverage = 1/100 = 0.01 < 0.5
+        agent.record(0, state.clone(), after.clone(), true, true);
+        // Temperature should NOT have decayed (coverage too low)
+        assert!(
+            (agent.temperature() - 2.0).abs() < 0.01,
+            "temp {} should be ~2.0 when coverage < gate",
+            agent.temperature()
+        );
+    }
+
+    #[test]
+    fn test_stochastic_bootstrap() {
+        let config = M0Config {
+            max_episodes: 500,
+            warmup_episodes: 100,
+            noise: 0.2,
+            seed: 42,
+            ..M0Config::default()
+        };
+        let mut world = MicroWorld::with_noise(config.world_size, config.noise, config.seed);
+        let mut agent = Stage0Agent::new(config);
+
+        for _ in 0..500 {
+            let state = world.observe();
+            let action = agent.select_action(&state);
+            let pred_a = agent.predict_path_a(action, &state);
+            let pred_b = agent.predict_path_b(action);
+
+            let _ = world.apply(action);
+            let actual = world.observe();
+
+            let hit_a = pred_a.as_ref() == Some(&actual);
+            let hit_b = pred_b.as_ref() == Some(&actual);
+
+            agent.record(action, state, actual, hit_a, hit_b);
+        }
+
+        assert!(
+            agent.path_a_accuracy() > 0.3,
+            "Path A accuracy {} too low with 20% noise after 500 episodes",
             agent.path_a_accuracy()
         );
     }

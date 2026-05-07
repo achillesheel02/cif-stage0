@@ -25,6 +25,14 @@ pub struct M0Config {
     pub seed: u64,
     /// Rolling window size for accuracy tracking.
     pub accuracy_window: usize,
+    /// Action noise probability [0.0, 1.0]. 0.0 = deterministic (Stage 0).
+    pub noise: f64,
+    /// Curiosity weight for action selection [0.0, 1.0]. 0.0 = pure familiarity (Stage 0).
+    pub curiosity_weight: f64,
+    /// Enable coverage-gated temperature decay. false = fixed decay (Stage 0).
+    pub adaptive_temperature: bool,
+    /// Coverage fraction required before temperature decay begins (only if adaptive_temperature).
+    pub coverage_gate: f64,
 }
 
 impl Default for M0Config {
@@ -40,6 +48,10 @@ impl Default for M0Config {
             strand_interval: 50,
             seed: 42,
             accuracy_window: 100,
+            noise: 0.0,
+            curiosity_weight: 0.0,
+            adaptive_temperature: false,
+            coverage_gate: 0.5,
         }
     }
 }

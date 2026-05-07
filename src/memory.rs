@@ -131,6 +131,31 @@ impl ExperienceMemory {
     pub fn count_for_action(&self, action: u8) -> usize {
         self.tuples.iter().filter(|t| t.action == action).count()
     }
+
+    /// Prediction confidence for (action, state_before).
+    /// Ratio of highest-count outcome to total observations.
+    /// 1.0 = deterministic, <1.0 = stochastic, 0.0 = no data.
+    pub fn prediction_confidence(&self, action: u8, state_before: &Grid) -> f64 {
+        let matching: Vec<&ExperienceTuple> = self
+            .tuples
+            .iter()
+            .filter(|t| t.action == action && &t.state_before == state_before)
+            .collect();
+
+        if matching.is_empty() {
+            return 0.0;
+        }
+
+        let total: u32 = matching.iter().map(|t| t.count).sum();
+        let max_count: u32 = matching.iter().map(|t| t.count).max().unwrap_or(0);
+
+        max_count as f64 / total as f64
+    }
+
+    /// Iterate over all stored tuples.
+    pub fn iter_tuples(&self) -> impl Iterator<Item = &ExperienceTuple> {
+        self.tuples.iter()
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +230,41 @@ mod tests {
         let query = grid_at(3, 1, 1);
         assert!(mem.retrieve(0, &query).is_none());
         assert!(mem.most_common_outcome(0).is_none());
+    }
+
+    // ── Stage 1 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_confidence_deterministic() {
+        let mut mem = ExperienceMemory::new();
+        let before = grid_at(3, 1, 1);
+        let after = grid_at(3, 0, 1);
+        for _ in 0..10 {
+            mem.store(0, before.clone(), after.clone());
+        }
+        assert!((mem.prediction_confidence(0, &before) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_confidence_stochastic() {
+        let mut mem = ExperienceMemory::new();
+        let before = grid_at(3, 1, 1);
+        let after_a = grid_at(3, 0, 1);
+        let after_b = grid_at(3, 2, 1);
+        for _ in 0..7 {
+            mem.store(0, before.clone(), after_a.clone());
+        }
+        for _ in 0..3 {
+            mem.store(0, before.clone(), after_b.clone());
+        }
+        assert!((mem.prediction_confidence(0, &before) - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_confidence_no_data() {
+        let mem = ExperienceMemory::new();
+        let before = grid_at(3, 1, 1);
+        assert!((mem.prediction_confidence(0, &before)).abs() < f64::EPSILON);
     }
 
     #[test]

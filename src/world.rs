@@ -5,6 +5,8 @@
 /// The system must discover that its actions reliably move the marker.
 
 use crate::grid::Grid;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 pub const ACTION_UP: u8 = 0;
 pub const ACTION_DOWN: u8 = 1;
@@ -19,16 +21,25 @@ pub struct MicroWorld {
     size: usize,
     marker_row: usize,
     marker_col: usize,
+    noise: f64,
+    rng: StdRng,
 }
 
 impl MicroWorld {
-    /// Create a new world with the marker at center.
+    /// Create a new world with the marker at center. Deterministic (Stage 0).
     pub fn new(size: usize) -> Self {
+        Self::with_noise(size, 0.0, 42)
+    }
+
+    /// Create a new world with action noise (Stage 1).
+    pub fn with_noise(size: usize, noise: f64, seed: u64) -> Self {
         let center = size / 2;
         Self {
             size,
             marker_row: center,
             marker_col: center,
+            noise,
+            rng: StdRng::seed_from_u64(seed.wrapping_add(1)),
         }
     }
 
@@ -39,9 +50,16 @@ impl MicroWorld {
         grid
     }
 
-    /// Apply an action. Deterministic. Clamps at edges.
-    pub fn apply(&mut self, action: u8) {
-        match action {
+    /// Apply an action. Returns the actually-executed action.
+    /// With noise > 0, the intended action may be replaced by a random one.
+    pub fn apply(&mut self, action: u8) -> u8 {
+        let executed = if self.noise > 0.0 && self.rng.gen::<f64>() < self.noise {
+            self.rng.gen_range(0..N_ACTIONS as u8)
+        } else {
+            action
+        };
+
+        match executed {
             ACTION_UP => {
                 if self.marker_row > 0 {
                     self.marker_row -= 1;
@@ -62,8 +80,9 @@ impl MicroWorld {
                     self.marker_col += 1;
                 }
             }
-            _ => {} // invalid action = no-op
+            _ => {}
         }
+        executed
     }
 
     /// Reset marker to center.
@@ -152,8 +171,8 @@ mod tests {
         let mut w2 = MicroWorld::new(5);
         let actions = [ACTION_UP, ACTION_RIGHT, ACTION_DOWN, ACTION_LEFT];
         for &a in &actions {
-            w1.apply(a);
-            w2.apply(a);
+            let _ = w1.apply(a);
+            let _ = w2.apply(a);
         }
         assert_eq!(w1.observe(), w2.observe());
     }
@@ -161,8 +180,8 @@ mod tests {
     #[test]
     fn test_reset() {
         let mut w = MicroWorld::new(5);
-        w.apply(ACTION_UP);
-        w.apply(ACTION_LEFT);
+        let _ = w.apply(ACTION_UP);
+        let _ = w.apply(ACTION_LEFT);
         w.reset();
         assert_eq!(w.marker_pos(), (2, 2));
     }
@@ -171,23 +190,66 @@ mod tests {
     fn test_grid_changes_after_action() {
         let mut w = MicroWorld::new(5);
         let before = w.observe();
-        w.apply(ACTION_UP);
+        let _ = w.apply(ACTION_UP);
         let after = w.observe();
         assert_ne!(before, after);
-        // Exactly 2 cells differ (old marker pos → bg, new marker pos → marker)
         assert_eq!(before.hamming_distance(&after), 2);
     }
 
     #[test]
     fn test_grid_unchanged_at_edge() {
         let mut w = MicroWorld::new(5);
-        // Move to top edge
         for _ in 0..5 {
-            w.apply(ACTION_UP);
+            let _ = w.apply(ACTION_UP);
         }
         let before = w.observe();
-        w.apply(ACTION_UP); // clamped — should not change
+        let _ = w.apply(ACTION_UP);
         let after = w.observe();
         assert_eq!(before, after);
+    }
+
+    // ── Stage 1 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_noise_zero_is_deterministic() {
+        let mut w1 = MicroWorld::with_noise(5, 0.0, 42);
+        let mut w2 = MicroWorld::with_noise(5, 0.0, 42);
+        let actions = [ACTION_UP, ACTION_RIGHT, ACTION_DOWN, ACTION_LEFT];
+        for &a in &actions {
+            assert_eq!(w1.apply(a), w2.apply(a));
+        }
+        assert_eq!(w1.observe(), w2.observe());
+    }
+
+    #[test]
+    fn test_apply_returns_executed_action() {
+        let mut w = MicroWorld::new(5);
+        assert_eq!(w.apply(ACTION_UP), ACTION_UP);
+        assert_eq!(w.apply(ACTION_DOWN), ACTION_DOWN);
+        assert_eq!(w.apply(ACTION_LEFT), ACTION_LEFT);
+        assert_eq!(w.apply(ACTION_RIGHT), ACTION_RIGHT);
+    }
+
+    #[test]
+    fn test_noise_one_produces_different_actions() {
+        let mut w = MicroWorld::with_noise(5, 1.0, 42);
+        let mut different = false;
+        for _ in 0..100 {
+            let executed = w.apply(ACTION_UP);
+            if executed != ACTION_UP {
+                different = true;
+                break;
+            }
+        }
+        assert!(different, "noise=1.0 should replace at least one action in 100 tries");
+    }
+
+    #[test]
+    fn test_noise_reproducible() {
+        let mut w1 = MicroWorld::with_noise(5, 0.5, 99);
+        let mut w2 = MicroWorld::with_noise(5, 0.5, 99);
+        for _ in 0..50 {
+            assert_eq!(w1.apply(ACTION_UP), w2.apply(ACTION_UP));
+        }
     }
 }
