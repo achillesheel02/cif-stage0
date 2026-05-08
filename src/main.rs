@@ -9,7 +9,7 @@
 ///   cargo run --release -- --size 3          # smaller world
 ///   cargo run --release -- --seed 99         # different RNG seed
 
-use cif_stage0::agent::Stage0Agent;
+use cif_stage0::agent::{Stage0Agent, Strategy};
 use cif_stage0::config::M0Config;
 use cif_stage0::grid::Grid;
 use cif_stage0::metrics::Metrics;
@@ -21,7 +21,9 @@ use std::collections::VecDeque;
 fn main() {
     let config = parse_args();
 
-    let stage = if config.goal_enabled {
+    let stage = if config.adaptive_strategy {
+        "Stage 7 — Online Adaptation"
+    } else if config.goal_enabled {
         "Stage 6 — Goal-Directed Planning"
     } else if config.self_model_enabled {
         "Stage 5 — Reflexive Self-Model"
@@ -62,6 +64,10 @@ fn main() {
         println!("Goal: enabled | Plan: {} | Greedy: {} | Plan depth: {} | Goal seed: {}",
             config.plan_enabled, config.greedy_enabled, config.plan_depth, config.goal_seed);
     }
+    if config.adaptive_strategy {
+        println!("Adaptive: enabled | Confidence gate: {:.2} | Recency rules: {} | Recency window: {}",
+            config.confidence_gate, config.recency_rules, config.recency_window);
+    }
     println!();
 
     let mut world = if config.goal_enabled {
@@ -86,8 +92,32 @@ fn main() {
         let state = world.observe();
         let context: Vec<(u8, Grid)> = history.iter().cloned().collect();
 
-        // Stage 6: goal-directed action selection (after warmup)
-        let action = if episode >= config.warmup_episodes && config.plan_enabled && config.goal_enabled {
+        // Stage 7: adaptive strategy selection (after warmup)
+        let action = if episode >= config.warmup_episodes && config.adaptive_strategy && config.goal_enabled {
+            let strategy = agent.select_strategy();
+            match strategy {
+                Strategy::Plan => {
+                    agent.plan_count += 1;
+                    if let Some(goal) = world.goal_pos() {
+                        planner::plan_bfs(&agent, &state, goal, config.plan_depth).action
+                    } else {
+                        agent.select_action(&state, &context)
+                    }
+                }
+                Strategy::Greedy => {
+                    agent.greedy_count += 1;
+                    if let (Some(goal), Some(pos)) = (world.goal_pos(), state.find_marker()) {
+                        planner::greedy_action(pos, goal, config.world_size)
+                    } else {
+                        agent.select_action(&state, &context)
+                    }
+                }
+                Strategy::Explore => {
+                    agent.explore_count += 1;
+                    agent.select_action(&state, &context)
+                }
+            }
+        } else if episode >= config.warmup_episodes && config.plan_enabled && config.goal_enabled {
             if let Some(goal) = world.goal_pos() {
                 planner::plan_bfs(&agent, &state, goal, config.plan_depth).action
             } else {
@@ -119,6 +149,10 @@ fn main() {
         let hit_a = pred_a.as_ref() == Some(&actual);
         let hit_b = pred_b.as_ref() == Some(&actual);
 
+        // Position-only rule hit (not penalized by goal/other marker changes)
+        let hit_r_pos = pred_r.as_ref().and_then(|p| p.find_marker()) == actual.find_marker();
+        agent.record_rule_pos_hit(hit_r_pos);
+
         // Stage 5: self-model prediction + best-path selection
         let pred_s = agent.predict_self(action, &state);
         let hit_s = Stage0Agent::self_hit(&pred_s, &actual);
@@ -146,12 +180,21 @@ fn main() {
             agent.record_other(&state, oa, hit_o, hit_o_freq, action);
         }
 
+        // Stage 7: push to recency buffer (before record consumes state)
+        if config.recency_rules {
+            agent.push_recency(action, state.clone(), actual.clone());
+        }
+
         // Record experience
         agent.record(action, state, actual, hit_r, hit_t, hit_a, hit_b, &context, hit_s, hit_best);
 
         // Periodic rule extraction
         if config.rules_enabled && episode > 0 && episode % config.rule_interval == 0 {
-            agent.extract_rules();
+            if config.recency_rules {
+                agent.extract_recency_rules();
+            } else {
+                agent.extract_rules();
+            }
         }
 
         // Maintain history buffer
@@ -313,6 +356,27 @@ fn parse_args() -> M0Config {
                     config.goal_seed = val.parse().unwrap_or(config.goal_seed);
                 }
             }
+            "--adaptive" => {
+                config.adaptive_strategy = true;
+                config.goal_enabled = true; // adaptive implies goal
+                config.rules_enabled = true; // adaptive implies rules
+            }
+            "--recency-rules" => {
+                config.recency_rules = true;
+                config.rules_enabled = true; // recency-rules implies rules
+            }
+            "--recency-window" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.recency_window = val.parse().unwrap_or(config.recency_window);
+                }
+            }
+            "--confidence-gate" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    config.confidence_gate = val.parse().unwrap_or(config.confidence_gate);
+                }
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -341,6 +405,10 @@ fn parse_args() -> M0Config {
                 println!("  --greedy          Enable greedy baseline navigation (Stage 6, implies --goal)");
                 println!("  --plan-depth N    BFS depth for planner (default: 3)");
                 println!("  --goal-seed N     RNG seed for goal placement (default: 271)");
+                println!("  --adaptive        Enable adaptive strategy selection (Stage 7, implies --goal --rules)");
+                println!("  --recency-rules   Extract rules from recent experience only (Stage 7, implies --rules)");
+                println!("  --recency-window N  Recency buffer size (default: 40)");
+                println!("  --confidence-gate F Minimum model accuracy to use planner (default: 0.8)");
                 std::process::exit(0);
             }
             _ => {}

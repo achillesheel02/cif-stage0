@@ -1,4 +1,4 @@
-# CIF Bootstrap Experiment: Stages 0–6
+# CIF Bootstrap Experiment: Stages 0–7
 
 **Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? Can it discover that another entity exists and build a predictive model of its behaviour? Can it improve its own predictions by factoring out what it can't control? And can it USE its learned model to navigate toward a goal?**
 
@@ -1382,6 +1382,83 @@ This maps to a broader CIF principle: **using Xi for action (planning) has highe
 
 The Stage 3→6 bridge is the most architecturally significant finding: rules (symbolic compression) aren't just about compact representation — they're the substrate that enables simulation of hypothetical futures. Without rules, the planner stalls at depth 1 because memory can't predict unseen states. With rules, the planner can roll out to arbitrary depth. **Compression enables imagination.**
 
+## Stage 7: Online Adaptation
+
+### Question
+
+Can the agent monitor its own model quality and adapt its strategy when the model fails? Stage 6 proved planning works when the model is accurate (1490 goals, 0.980 efficiency) but fails catastrophically under drift (3 goals, 0.048 efficiency — worse than greedy's 10). The agent has all the signals needed to detect this failure (rolling accuracy, rule confidence) but never uses them. Stage 7 asks: can the agent gate planning on model confidence and fall back gracefully?
+
+### Design
+
+Two mechanisms:
+
+1. **Adaptive strategy selection**: A `Strategy` enum {Plan, Greedy, Explore} with `select_strategy()` gating on model confidence:
+   - `rule_pos_accuracy >= confidence_gate (0.80)` → Plan (model-based BFS)
+   - Otherwise → Greedy (Manhattan distance, model-free)
+
+   The key signal is **position-only rule accuracy** — whether the rule correctly predicted the agent's position, ignoring goal/other markers. Full-grid accuracy (`path_r_accuracy`) is structurally penalized by goal respawns (the goal moves randomly when reached, creating unavoidable prediction misses even with perfect movement rules).
+
+2. **Recency-weighted rule extraction**: A `recency_buffer: VecDeque<(u8, Grid, Grid)>` stores raw recent experiences. When `recency_rules=true`, rules are extracted from this buffer instead of full memory, tracking recent dynamics rather than averaging across all history.
+
+3. **State-preserving rule prediction**: `rules.predict()` now clones the input state and moves the agent, preserving goal markers (color=3) and other agent markers (color=2). Previously it constructed a blank grid with only the agent, causing full-grid comparison to always fail in goal mode.
+
+### Results
+
+| # | Config | Goals | Efficiency | Strategy | vs Stage 6 |
+|---|--------|-------|-----------|----------|-------------|
+| 1 | Adaptive, clean | 1490 | 0.981 | plan=98.7% | = Stage 6 plan |
+| 2 | Adaptive, drift | 24 | 0.066 | greedy=68.5%, plan=31.5% | 8x Stage 6 plan (3) |
+| 3 | Fixed plan + recency, drift | 12 | 0.018 | fixed plan | 4x Stage 6 plan (3) |
+| 4 | Adaptive + recency, drift | 10 | 0.180 | greedy=100% | = Stage 6 greedy (10) |
+| 5 | Adaptive, noise=0.2 | 1159 | 0.764 | plan=93.2% | ~ Stage 6 plan+noise (1145) |
+| 6 | Adaptive + recency, drift+noise | 160 | 0.104 | greedy=100% | 53x Stage 6 plan+drift (3) |
+| 7 | Adaptive + multi-agent | 1500 | 0.981 | plan=98.6% | = Stage 6 multi-agent |
+
+**Stage 6 baselines under drift** (for reference):
+- Fixed plan: 3 goals, 0.048 efficiency
+- Greedy: 10 goals, 0.180 efficiency
+- No navigation: 3 goals, 0.034 efficiency
+
+### Findings
+
+**The adaptive strategy works.** On a clean grid (EXP 1), it matches Stage 6's fixed plan exactly — 1490 goals, 0.981 efficiency, plan=98.7%. Under drift (EXP 2), it detects low model confidence (rule_pos_accuracy=0.780, below gate=0.80) and falls back to greedy, achieving 24 goals — **8x better than Stage 6's forced plan** which navigated AWAY from the goal with corrupted rules.
+
+**Greedy is the correct fallback, not exploration.** The initial design had three tiers: Plan → Greedy → Explore. But exploration makes no sense when a goal is visible — greedy only needs the goal position, not an accurate world model. Removing the exploration tier for goal-directed tasks improved drift performance from 3 goals (explore=100%) to 24 goals (greedy=68.5%).
+
+**Recency rules help rules but not planning.** Extracting rules from a 20-step window (recency_rules=true) increases rule confidence to 0.90-0.95 under drift, but the recency buffer **always lags the current drift phase**. By the time rules are re-extracted, the dynamics have shifted. This is a fundamental timing limitation: retrospective extraction can't predict the next phase. The adaptive strategy correctly compensates by detecting when rules lag and falling back to greedy.
+
+**The compound case (drift + noise) produces the most dramatic result.** EXP 6 achieves 160 goals under drift + 20% noise — 53x the Stage 6 forced-plan baseline (3 goals). This works because the adaptive strategy falls to greedy, which handles compound adversity through geometric convergence: 80% of actions go toward the goal (noise replaces 20%), and over a full drift cycle the drift averages to zero.
+
+**Position-only accuracy is the correct gating signal.** Three candidate signals were evaluated:
+- `path_r_accuracy` (full-grid comparison): structurally capped at ~0.70 in goal mode because goal respawns cause unavoidable misses. The confidence gate can never be reached.
+- `rule_set.avg_confidence()` (intrinsic rule consistency): reads 0.819 under drift even though rules are wrong. Internal consistency ≠ external accuracy.
+- `rule_pos_accuracy` (agent position only): correctly reads ~1.0 when rules are right and ~0.27 when rules lag the current phase. This is the right signal.
+
+**The strategy selector is a meta-prediction mechanism (D7).** It doesn't predict the next state — it predicts the quality of its own predictions. When the prediction-of-prediction is high, it trusts the planner. When low, it falls back. This is the first layer of genuine self-monitoring in the bootstrap sequence.
+
+### Key Insights
+
+Stage 7 reveals a hierarchy of model-use requirements:
+
+| Use | Accuracy needed | Why |
+|-----|----------------|-----|
+| Observation | > 0.5 | Better than chance → some information |
+| Prediction | > 0.7 | Must exceed memory baseline |
+| Planning | > 0.8 | Errors compound across rollout depth |
+| Strategy selection | Position-only | Only movement matters, not full state |
+
+The progression across seven stages:
+- **Stage 0**: "I can predict my world" (91.7%)
+- **Stage 1**: "Even when my actions are noisy" (84.5%)
+- **Stage 2**: "Even when the world changes over time" (acc_T = 0.787)
+- **Stage 3**: "And I can generalise beyond what I've seen" (acc_R = 1.000)
+- **Stage 4**: "I can model what others do" (acc_O = 1.000)
+- **Stage 5**: "And I know what's me and what isn't" (acc_S = 1.000)
+- **Stage 6**: "And I can use what I've learned to get somewhere" (efficiency = 0.980)
+- **Stage 7**: "And I know when to trust what I've learned" (plan=98.7% clean, greedy=68.5% drift)
+
+The most important finding: **a wrong model is worse than no model, but the agent can detect the difference.** Stage 6 showed that planning with wrong rules is catastrophic (3 goals). Stage 7 shows that the agent can measure its own model quality in real-time and adapt. The gate between these — knowing WHEN to plan vs WHEN to fall back — is the first empirical demonstration of D7 (meta-prediction) in the bootstrap sequence.
+
 ## Reproducing
 
 ```bash
@@ -1530,6 +1607,26 @@ cargo run --release -- --goal --plan --rules --other random --self-model
 # Large grid: greedy dominates (1506 goals vs planner's 4)
 cargo run --release -- --goal --greedy --size 10 --episodes 10000
 cargo run --release -- --goal --plan --rules --size 10 --episodes 10000
+
+# ── Stage 7 (online adaptation) ──────────────────────────────────
+
+# Adaptive on clean grid — matches Stage 6 plan (1490 goals, plan=98.7%)
+cargo run --release -- --goal --adaptive --rules
+
+# Adaptive under drift — detects model failure, greedy fallback (24 goals)
+cargo run --release -- --goal --adaptive --rules --drift
+
+# Adaptive under noise — handles gracefully (1159 goals, plan=93.2%)
+cargo run --release -- --goal --adaptive --rules --noise 0.2
+
+# Adaptive + recency + drift — greedy fallback (10 goals, greedy=100%)
+cargo run --release -- --goal --adaptive --rules --drift --recency-rules --recency-window 20 --rule-interval 10
+
+# Compound: drift + noise + recency — dramatic result (160 goals)
+cargo run --release -- --goal --adaptive --rules --drift --noise 0.2 --recency-rules --recency-window 20 --rule-interval 10
+
+# Adaptive + multi-agent — layers compose (1500 goals, plan=98.6%)
+cargo run --release -- --goal --adaptive --rules --other random --self-model
 ```
 
 **Dependency**: Requires [strand-core](https://github.com/achillesheel02/strand-core) at `../strand-core`.
@@ -1539,7 +1636,7 @@ cargo run --release -- --goal --plan --rules --size 10 --episodes 10000
 ```
 src/
   grid.rs         Grid type + Hamming distance + marker/goal detection + strip_color (state representation)
-  config.rs       M0Config (all tunable parameters, Stages 0–6)
+  config.rs       M0Config (all tunable parameters, Stages 0–7)
   world.rs        MicroWorld (deterministic, stochastic, drifting, multi-agent, or goal-directed grid environment)
   memory.rs       ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
   self_model.rs   SelfMemory (factored memory that strips other-agent markers, Stage 5)
@@ -1547,13 +1644,13 @@ src/
   rules.rs        RuleSet (symbolic movement rules, generative prediction, Stage 3)
   planner.rs      BFS planner + greedy baseline (model-based goal-directed planning, Stage 6)
   other.rs        OtherAgent + OtherPolicy (5 fixed-policy behaviours, Stage 4)
-  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, planning interface, curiosity-weighted softmax)
-  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model + goal diagnosis)
-  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model + planning)
+  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, planning interface, adaptive strategy, curiosity-weighted softmax)
+  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model + goal + strategy diagnosis)
+  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model + planning + adaptive strategy)
   lib.rs          Module exports
 ```
 
-~4000 lines of Rust. 107 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
+~4800 lines of Rust. 112 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
 
 ## Theoretical Context
 
@@ -1568,6 +1665,7 @@ This experiment tests the first stage of a curriculum for building a CIF-based c
 | **4** | Other agents exist | Multi-agent | Theory of mind (dual-path O-A/O-B) | **DONE** — acc_O=1.000, Xi_other=+0.812 |
 | **5** | Self/other separation improves predictions | Reflexive | Factored self-memory + best-path selector | **DONE** — acc_S=1.000, Xi_self=+0.758, 19x compression |
 | **6** | Model enables goal-directed navigation | Goal-directed | BFS planner over model rollouts | **DONE** — 1490 goals, efficiency=0.980, rules essential |
+| **7** | Agent monitors and adapts strategy | Drifting goal-directed | Adaptive strategy + position-gated confidence | **DONE** — 24 goals under drift (8x forced plan), 1159 goals with noise |
 
 Stage 0 answered: *can M_0 bootstrap at all?* Yes, in a deterministic environment.
 
@@ -1582,6 +1680,8 @@ Stage 4 answered: *can M_0 discover another entity and build a predictive model?
 Stage 5 answered: *can M_0 improve its own predictions by factoring out what it can't control?* Yes — with dramatic effect. SelfMemory strips the other agent's position before store and retrieve, compressing 1882 fragmented tuples to 100 self-only tuples (19x reduction). The result: acc_S = 1.000 — perfect recovery from the 73.6% collapse caused by random B. Xi_self = +0.758 is the largest advantage signal in the entire experiment series. The best-path selector correctly identifies which prediction method to trust, achieving genuine meta-prediction. The key insight: **the self/world separation (precondition #3) must be active, not just a label.** When implemented as factored memory, it doesn't just attribute causation — it prevents irrelevant information from corrupting learning.
 
 Stage 6 answered: *can M_0 USE its model to navigate toward a goal?* Yes — with a critical caveat. On a simple 5x5 grid, the BFS planner using rules as its simulator achieves 1490 goals at 0.980 efficiency, matching the greedy baseline. But the planner FAILS under drift (3 goals, efficiency 0.048 — worse than greedy's 10) because rules are corrupted by drift phase mixing, and planning amplifies model error across the rollout horizon. Without rules, planning is almost useless (2 goals) because memory can't predict unseen states — proving that symbolic compression (Stage 3) is a prerequisite for imagination. The key insights: **compression enables imagination** (rules let the agent simulate hypothetical futures that memory cannot), and **a wrong model is worse than no model** (planning with a 70% accurate model actively misleads because errors compound across planning steps). The layered architecture composes cleanly: self-model (Stage 5) + rules (Stage 3) + planner (Stage 6) together handle multi-agent goal-directed navigation at full efficiency.
+
+Stage 7 answered: *can M_0 detect model failure and adapt its strategy?* Yes — by monitoring position-only prediction accuracy and gating planning on model confidence. On a clean grid, the agent plans 98.7% of the time and matches Stage 6 exactly (1490 goals). Under drift, it detects low model confidence and falls back to greedy, achieving 24 goals — 8x the catastrophic 3 goals from Stage 6's forced plan. The key insights: **position-only accuracy is the correct gating signal** (full-grid accuracy is structurally penalized by goal respawns, and intrinsic rule confidence fails to detect wrong-but-consistent rules), **greedy is the correct fallback** (exploration makes no sense when a goal is visible), and **retrospective rule extraction can't outrun drift** (recency buffers always lag the current phase, so the adaptive strategy compensates by detecting and falling back rather than trying to fix the rules). The meta-prediction gate — knowing WHEN to trust the model — is the first demonstration of D7 in the bootstrap sequence.
 
 ## License
 

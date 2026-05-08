@@ -22,6 +22,13 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Strategy {
+    Plan,
+    Greedy,
+    Explore,
+}
+
 pub struct Stage0Agent {
     pub memory: ExperienceMemory,
     pub temporal_memory: TemporalMemory,
@@ -55,6 +62,15 @@ pub struct Stage0Agent {
     path_s_hits: Vec<VecDeque<bool>>,
     /// Rolling accuracy for best-path selection.
     best_path_hits: VecDeque<bool>,
+    /// Recent raw experiences for recency-weighted rule extraction (Stage 7).
+    recency_buffer: VecDeque<(u8, Grid, Grid)>,
+    /// Rolling accuracy for rule position predictions (agent position only, ignores goal/other).
+    /// Used by select_strategy() — not penalized by goal respawns.
+    rule_pos_hits: VecDeque<bool>,
+    /// Strategy selection counters (Stage 7).
+    pub plan_count: u64,
+    pub greedy_count: u64,
+    pub explore_count: u64,
 }
 
 impl Stage0Agent {
@@ -64,6 +80,7 @@ impl Stage0Agent {
         let n = config.n_actions;
         let context_len = config.context_len;
         let world_size = config.world_size;
+        let recency_window = config.recency_window;
         let self_memory = if config.self_model_enabled {
             Some(SelfMemory::new())
         } else {
@@ -89,6 +106,11 @@ impl Stage0Agent {
             self_memory,
             path_s_hits: (0..n).map(|_| VecDeque::with_capacity(window)).collect(),
             best_path_hits: VecDeque::with_capacity(window),
+            recency_buffer: VecDeque::with_capacity(recency_window),
+            rule_pos_hits: VecDeque::with_capacity(window),
+            plan_count: 0,
+            greedy_count: 0,
+            explore_count: 0,
         }
     }
 
@@ -645,6 +667,65 @@ impl Stage0Agent {
         self.memory.retrieve(action, state).cloned()
     }
 
+    // ── Stage 7: Online Adaptation ─────────────────────────────────────
+
+    /// Push a raw experience into the recency buffer.
+    pub fn push_recency(&mut self, action: u8, state: Grid, actual: Grid) {
+        self.recency_buffer.push_back((action, state, actual));
+        if self.recency_buffer.len() > self.config.recency_window {
+            self.recency_buffer.pop_front();
+        }
+    }
+
+    /// Extract rules from the recency buffer only.
+    pub fn extract_recency_rules(&mut self) {
+        let tuples: Vec<(u8, Grid, Grid)> = self.recency_buffer.iter().cloned().collect();
+        self.rule_set.extract_from_raw(&tuples, self.config.world_size);
+    }
+
+    /// Record whether the rule prediction got the agent position right.
+    /// Separate from hit_r (full-grid) — not penalized by goal respawns.
+    pub fn record_rule_pos_hit(&mut self, hit: bool) {
+        if self.rule_pos_hits.len() >= self.config.accuracy_window {
+            self.rule_pos_hits.pop_front();
+        }
+        self.rule_pos_hits.push_back(hit);
+    }
+
+    /// Rolling accuracy for rule position predictions (agent position only).
+    pub fn rule_pos_accuracy(&self) -> f64 {
+        if self.rule_pos_hits.is_empty() {
+            return 0.0;
+        }
+        let hits = self.rule_pos_hits.iter().filter(|&&b| b).count();
+        hits as f64 / self.rule_pos_hits.len() as f64
+    }
+
+    /// Select strategy based on model confidence.
+    /// Uses position-only rule accuracy — correctly detects model failure under
+    /// drift without being penalized by goal respawns.
+    /// Greedy is always available as fallback when a goal exists (it only needs
+    /// the goal position, not an accurate world model).
+    pub fn select_strategy(&self) -> Strategy {
+        let model_conf = if self.config.rules_enabled && self.rule_set.rule_count() > 0 {
+            self.rule_pos_accuracy()
+        } else {
+            self.path_a_accuracy()
+        };
+
+        if model_conf >= self.config.confidence_gate {
+            Strategy::Plan
+        } else {
+            // Greedy only needs the goal position — no model required
+            Strategy::Greedy
+        }
+    }
+
+    /// Strategy selection counters for metrics.
+    pub fn strategy_counts(&self) -> (u64, u64, u64) {
+        (self.plan_count, self.greedy_count, self.explore_count)
+    }
+
     /// Average prediction confidence across unique (action, state_before) pairs.
     pub fn avg_prediction_confidence(&self) -> f64 {
         let mut seen: Vec<(u8, &Grid)> = Vec::new();
@@ -1095,5 +1176,63 @@ mod tests {
 
         let (_, name) = agent.best_prediction(0, &state, &[]);
         assert_eq!(name, "S");
+    }
+
+    // ── Stage 7 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_strategy_high_confidence() {
+        let config = M0Config {
+            rules_enabled: true,
+            confidence_gate: 0.8,
+            warmup_episodes: 0,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+        let after = Grid::filled(5, 5, 0);
+
+        // Feed 100% rule hits → high confidence → should select Plan
+        for _ in 0..20 {
+            agent.record(0, state.clone(), after.clone(), true, true, true, true, &[], false, false);
+        }
+        assert_eq!(agent.select_strategy(), Strategy::Plan);
+    }
+
+    #[test]
+    fn test_strategy_low_confidence() {
+        let config = M0Config {
+            rules_enabled: true,
+            confidence_gate: 0.8,
+            warmup_episodes: 0,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+        let after = Grid::filled(5, 5, 0);
+
+        // Feed 0% rule hits → low confidence → should select Greedy (not Plan)
+        for _ in 0..20 {
+            agent.record(0, state.clone(), after.clone(), false, false, false, false, &[], false, false);
+        }
+        assert_eq!(agent.select_strategy(), Strategy::Greedy);
+    }
+
+    #[test]
+    fn test_recency_buffer_cap() {
+        let config = M0Config {
+            recency_window: 5,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+        let state = Grid::filled(5, 5, 0);
+
+        for i in 0..10 {
+            let mut after = Grid::filled(5, 5, 0);
+            after.set(0, i % 5, 1);
+            agent.push_recency(0, state.clone(), after);
+        }
+        // Buffer should be capped at 5
+        assert_eq!(agent.recency_buffer.len(), 5);
     }
 }

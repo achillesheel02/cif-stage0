@@ -109,13 +109,59 @@ impl RuleSet {
             .max(0)
             .min(self.world_size as i32 - 1) as usize;
 
-        let mut predicted = Grid::filled(state.width, state.height, 0);
-        predicted.set(new_row, new_col, 1);
+        let mut predicted = state.clone();
+        predicted.set(row, col, 0);          // clear old agent position
+        predicted.set(new_row, new_col, 1);  // place agent at new position
         Some(predicted)
     }
 
     pub fn rule_count(&self) -> usize {
         self.rules.len()
+    }
+
+    /// Extract movement rules from raw (action, state_before, state_after) tuples.
+    /// Each tuple has implicit count=1. Used for recency-weighted extraction.
+    pub fn extract_from_raw(&mut self, tuples: &[(u8, Grid, Grid)], world_size: usize) {
+        let mut delta_counts: HashMap<(u8, bool, i32, i32), u32> = HashMap::new();
+        let mut totals: HashMap<(u8, bool), u32> = HashMap::new();
+
+        for (action, state_before, state_after) in tuples {
+            let pos_before = state_before.find_marker();
+            let pos_after = state_after.find_marker();
+
+            if let (Some((rb, cb)), Some((ra, ca))) = (pos_before, pos_after) {
+                let dr = ra as i32 - rb as i32;
+                let dc = ca as i32 - cb as i32;
+                let edge = is_at_edge(*action, rb, cb, world_size);
+
+                *delta_counts
+                    .entry((*action, edge, dr, dc))
+                    .or_insert(0) += 1;
+                *totals.entry((*action, edge)).or_insert(0) += 1;
+            }
+        }
+
+        let mut best: HashMap<(u8, bool), (i32, i32, u32)> = HashMap::new();
+        for ((action, edge, dr, dc), count) in &delta_counts {
+            let key = (*action, *edge);
+            let entry = best.entry(key).or_insert((0, 0, 0));
+            if *count > entry.2 {
+                *entry = (*dr, *dc, *count);
+            }
+        }
+
+        self.rules.clear();
+        for ((action, at_edge), (dr, dc, count)) in &best {
+            let total = totals[&(*action, *at_edge)];
+            self.rules.push(MovementRule {
+                action: *action,
+                at_edge: *at_edge,
+                delta_row: *dr,
+                delta_col: *dc,
+                count: *count,
+                total,
+            });
+        }
     }
 
     /// Average confidence across rules: mean(count/total).
@@ -247,6 +293,51 @@ mod tests {
         rules.extract(&mem);
 
         assert!((rules.avg_confidence() - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_extract_from_raw_basic() {
+        let tuples = vec![
+            (ACTION_UP, grid_at(5, 2, 2), grid_at(5, 1, 2)),
+            (ACTION_UP, grid_at(5, 3, 1), grid_at(5, 2, 1)),
+            (ACTION_DOWN, grid_at(5, 1, 1), grid_at(5, 2, 1)),
+        ];
+
+        let mut rules = RuleSet::new(5);
+        rules.extract_from_raw(&tuples, 5);
+
+        assert_eq!(rules.rule_count(), 2); // UP interior + DOWN interior
+        let up_rule = rules.rules.iter().find(|r| r.action == ACTION_UP).unwrap();
+        assert_eq!(up_rule.delta_row, -1);
+        assert_eq!(up_rule.delta_col, 0);
+    }
+
+    #[test]
+    fn test_extract_from_raw_matches_extract() {
+        // Same data through both paths should produce same rules
+        let mut mem = ExperienceMemory::new();
+        let raw = vec![
+            (ACTION_UP, grid_at(5, 2, 2), grid_at(5, 1, 2)),
+            (ACTION_DOWN, grid_at(5, 2, 2), grid_at(5, 3, 2)),
+            (ACTION_LEFT, grid_at(5, 2, 2), grid_at(5, 2, 1)),
+            (ACTION_RIGHT, grid_at(5, 2, 2), grid_at(5, 2, 3)),
+        ];
+        for (a, sb, sa) in &raw {
+            mem.store(*a, sb.clone(), sa.clone());
+        }
+
+        let mut rules_mem = RuleSet::new(5);
+        rules_mem.extract(&mem);
+
+        let mut rules_raw = RuleSet::new(5);
+        rules_raw.extract_from_raw(&raw, 5);
+
+        assert_eq!(rules_mem.rule_count(), rules_raw.rule_count());
+        // Both should predict the same for any state
+        let state = grid_at(5, 3, 3);
+        for action in 0..4u8 {
+            assert_eq!(rules_mem.predict(action, &state), rules_raw.predict(action, &state));
+        }
     }
 
     #[test]

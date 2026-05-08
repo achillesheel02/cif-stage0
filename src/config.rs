@@ -63,6 +63,14 @@ pub struct M0Config {
     pub plan_depth: usize,
     /// Separate RNG seed for goal placement.
     pub goal_seed: u64,
+    /// Enable adaptive strategy selection (Stage 7).
+    pub adaptive_strategy: bool,
+    /// Extract rules from recent experience only (Stage 7).
+    pub recency_rules: bool,
+    /// Size of recency buffer for rule extraction (Stage 7).
+    pub recency_window: usize,
+    /// Minimum model accuracy to use planner (Stage 7).
+    pub confidence_gate: f64,
 }
 
 impl Default for M0Config {
@@ -96,6 +104,10 @@ impl Default for M0Config {
             greedy_enabled: false,
             plan_depth: 3,
             goal_seed: 271,
+            adaptive_strategy: false,
+            recency_rules: false,
+            recency_window: 40,
+            confidence_gate: 0.8,
         }
     }
 }

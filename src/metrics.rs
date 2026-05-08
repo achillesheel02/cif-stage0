@@ -101,7 +101,14 @@ impl Metrics {
         };
 
         if !self.header_printed {
-            if agent.config.goal_enabled {
+            if agent.config.adaptive_strategy {
+                println!(
+                    "{:<8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10}",
+                    "episode", "goals", "effic", "acc_R", "acc_A", "plan%", "greedy%", "expl%",
+                    "consol", "entropy", "gap"
+                );
+                println!("{}", "-".repeat(110));
+            } else if agent.config.goal_enabled {
                 println!(
                     "{:<8} {:>6} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
                     "episode", "goals", "avg_steps", "effic", "acc_R", "acc_A", "acc_B",
@@ -155,7 +162,24 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        if agent.config.goal_enabled {
+        if agent.config.adaptive_strategy {
+            let (pc, gc, ec) = agent.strategy_counts();
+            let total = (pc + gc + ec).max(1) as f64;
+            println!(
+                "{:<8} {:>6} {:>8.3} {:>8.3} {:>8.3} {:>7.1}% {:>7.1}% {:>7.1}% {:>8.3} {:>8.3} {:>10}",
+                snap.episode,
+                snap.goals_reached,
+                snap.navigation_efficiency,
+                snap.accuracy_r,
+                snap.accuracy,
+                100.0 * pc as f64 / total,
+                100.0 * gc as f64 / total,
+                100.0 * ec as f64 / total,
+                snap.consolidation,
+                snap.entropy,
+                gap_str,
+            );
+        } else if agent.config.goal_enabled {
             println!(
                 "{:<8} {:>6} {:>10.1} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10} {:>10}",
                 snap.episode,
@@ -614,6 +638,30 @@ impl Metrics {
             if goals == 0 && agent.config.max_episodes > 500 {
                 println!("  NO GOALS REACHED — check plan_depth or model coverage.");
             }
+        }
+
+        // Adaptive strategy diagnosis (Stage 7)
+        if agent.config.adaptive_strategy {
+            let (pc, gc, ec) = agent.strategy_counts();
+            let total = (pc + gc + ec).max(1) as f64;
+            println!(
+                "Strategy: plan={:.1}% greedy={:.1}% explore={:.1}% (gate={:.2}, model_conf={:.3})",
+                100.0 * pc as f64 / total,
+                100.0 * gc as f64 / total,
+                100.0 * ec as f64 / total,
+                agent.config.confidence_gate,
+                agent.rule_pos_accuracy(),
+            );
+            if pc as f64 / total > 0.8 {
+                println!("  MODEL CONFIDENT — planning dominates ({:.1}%), model accuracy sufficient.", 100.0 * pc as f64 / total);
+            } else if gc as f64 / total > 0.5 {
+                println!("  MODEL UNCERTAIN — greedy fallback dominates ({:.1}%), model below confidence gate.", 100.0 * gc as f64 / total);
+            }
+        }
+        if agent.config.recency_rules {
+            println!("Recency rules: window={}, rule confidence={:.3}",
+                agent.config.recency_window,
+                agent.rule_set.avg_confidence());
         }
 
         if ent < max_ent * 0.3 && agent.episode_count < agent.config.warmup_episodes * 2 {
