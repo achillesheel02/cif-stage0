@@ -1,4 +1,4 @@
-# CIF Bootstrap Experiment: Stages 0–7
+# CIF Bootstrap Experiment: Stages 0–8
 
 **Can a system with zero prior knowledge learn to anticipate its environment using only five preconditions? Does that ability survive noise? Can it learn temporal patterns? Can it compress raw experience into symbolic rules that generalise to unseen states? Can it discover that another entity exists and build a predictive model of its behaviour? Can it improve its own predictions by factoring out what it can't control? And can it USE its learned model to navigate toward a goal?**
 
@@ -1459,6 +1459,80 @@ The progression across seven stages:
 
 The most important finding: **a wrong model is worse than no model, but the agent can detect the difference.** Stage 6 showed that planning with wrong rules is catastrophic (3 goals). Stage 7 shows that the agent can measure its own model quality in real-time and adapt. The gate between these — knowing WHEN to plan vs WHEN to fall back — is the first empirical demonstration of D7 (meta-prediction) in the bootstrap sequence.
 
+## Stage 8: Active Calibration
+
+### Question
+
+When Stage 7's adaptive strategy detects model failure, it falls back to greedy — a safe but passive response. Can the agent instead **actively repair its model** by taking deliberate probe actions to re-learn current dynamics, then resume planning with a refreshed model? Stage 7 showed the agent knows WHEN its model fails. Stage 8 asks: can it DO something about it?
+
+### Design
+
+Three mechanisms:
+
+1. **Calibration probes**: When model confidence drops below `confidence_gate` and cooldown has expired, the agent enters a calibration cycle. It sequentially takes all `n_actions` actions (0, 1, 2, 3) regardless of goal direction, recording (action, state_before, state_after) for each. After all probes, it re-extracts rules from the probe data and returns to adaptive strategy selection.
+
+2. **Cooldown**: After each calibration cycle, a cooldown of `n_actions` episodes prevents immediate recalibration. During cooldown, the agent uses greedy fallback if model confidence is still low. This prevents thrashing between calibration and planning during rapid drift phase transitions.
+
+3. **Strategy extension**: The `Strategy` enum adds `Calibrate(u8)` (probe a specific action). Strategy selection order: mid-calibration → Plan (if confident) → Plan (trust fresh rules for n_actions episodes after calibration) → Calibrate (if enabled and cooldown=0) → Greedy (fallback).
+
+### Results
+
+| # | Config | Goals | Efficiency | Strategy | Cycles | vs Stage 7 |
+|---|--------|-------|-----------|----------|--------|-------------|
+| 1 | Calibrate, clean | 1481 | 0.975 | plan=99.8%, cal=0.2% | 2 | ≈ Stage 7 (1490) |
+| 2 | Calibrate, drift (period=10) | 3 | 0.045 | plan=50.1%, cal=49.9% | 611 | << Stage 7 (63) |
+| 3 | Calibrate, drift (period=50) | 1 | 0.154 | plan=87.8%, cal=12.2% | 149 | << Stage 7 (10) |
+| 4 | Calibrate, noise=0.2 | 869 | 0.577 | plan=86.8%, cal=13.2% | 162 | < Stage 7 (1095) |
+| 5 | Greedy, drift | 10 | 0.180 | fixed greedy | — | Stage 6 baseline |
+| 6 | Stage 7, drift | 63 | 0.041 | plan=17%, greedy=83% | — | Stage 7 baseline |
+
+**Stage 6 baselines** (for reference):
+- Fixed plan, clean: 1490 goals, 0.980 efficiency
+- Greedy, clean: 1490 goals, 0.981 efficiency
+
+### Findings
+
+**Calibration works on clean grids with near-zero overhead.** EXP 1 achieves 1481 goals at 0.975 efficiency — effectively matching Stage 7's 1490. Only 2 calibration cycles fire (8 total probe episodes out of 4900 post-warmup), triggered by the initial rule extraction window. Once the model stabilises, the agent plans 99.8% of the time. The mechanism correctly identifies when probing is unnecessary.
+
+**Under drift, calibration is counterproductive.** EXP 2 achieves only 3 goals — identical to Stage 6's catastrophic forced-plan result. The agent oscillates: calibrate (50.1%) → plan briefly → phase changes → model degrades → calibrate again. 611 calibration cycles consume 2444 of 4900 post-warmup episodes with probe actions that move the agent in arbitrary directions, away from the goal. Stage 7's greedy fallback (63 goals) is 21x better.
+
+**The fundamental trade-off: calibration has NAVIGATION cost, not just opportunity cost.** Each calibration cycle takes `n_actions` probe actions (0, 1, 2, 3) that move the agent away from the goal. Greedy fallback always makes progress toward the goal. On an obstacle-free grid:
+- 4 calibration probes = 4 episodes moving randomly
+- 4 greedy episodes = 4 episodes moving toward goal
+- Even if calibration produces perfect rules, the 4 wasted episodes must be amortised by superior planning in the remaining episodes
+
+**On this environment, the amortisation never pays off.** On a 5x5 obstacle-free grid, greedy IS optimal — there are no obstacles for the planner to navigate around. The planner's BFS advantage (if any) comes from drift compensation, which requires perfect phase-aligned rules. But calibration itself costs ~40% of each phase (4 probes out of 10-episode phases), leaving insufficient planning episodes to recoup the cost.
+
+**Calibration would be valuable when:**
+1. The environment has obstacles that greedy can't navigate
+2. Planning advantage over greedy is large (long paths, complex dynamics)
+3. Drift periods are long relative to calibration cost
+4. Model accuracy from probes is substantially better than passive observation
+
+### Key Insights
+
+Stage 8 reveals the **cost/benefit structure of active model repair:**
+
+| Factor | This environment | Calibration-favourable |
+|--------|-----------------|----------------------|
+| Grid obstacles | None (greedy optimal) | Many (greedy gets stuck) |
+| Plan advantage | ~0% over greedy | Large (multi-step routing) |
+| Drift period | 10 steps | >> 4 × n_actions |
+| Probe cost | 4 episodes (40% of phase) | < 10% of dynamics window |
+
+The progression across eight stages:
+- **Stage 0**: "I can predict my world" (91.7%)
+- **Stage 1**: "Even when my actions are noisy" (84.5%)
+- **Stage 2**: "Even when the world changes over time" (acc_T = 0.787)
+- **Stage 3**: "And I can generalise beyond what I've seen" (acc_R = 1.000)
+- **Stage 4**: "I can model what others do" (acc_O = 1.000)
+- **Stage 5**: "And I know what's me and what isn't" (acc_S = 1.000)
+- **Stage 6**: "And I can use what I've learned to get somewhere" (efficiency = 0.980)
+- **Stage 7**: "And I know when to trust what I've learned" (plan=98.7% clean, greedy=68.5% drift)
+- **Stage 8**: "And I can repair what I've learned — but only when repair is cheaper than the alternative" (cal=0.2% clean, greedy fallback under drift)
+
+The most important finding: **knowing HOW to repair a model is not the same as knowing WHEN repair is cost-effective.** Stage 7's meta-prediction (D7: knowing when the model fails) is necessary for Stage 8. But Stage 8 adds a second layer of meta-cognition: the agent must evaluate whether the remediation strategy (active probing) will produce enough benefit to justify its cost. On this simple environment, the answer is no — greedy fallback is always cheaper. This is itself a D7 finding about D7: **meta-prediction about the meta-prediction strategy.**
+
 ## Reproducing
 
 ```bash
@@ -1627,6 +1701,20 @@ cargo run --release -- --goal --adaptive --rules --drift --noise 0.2 --recency-r
 
 # Adaptive + multi-agent — layers compose (1500 goals, plan=98.6%)
 cargo run --release -- --goal --adaptive --rules --other random --self-model
+
+# ── Stage 8 (active calibration) ──────────────────────────────────
+
+# Calibration on clean grid — near-zero overhead (1481 goals, cal=0.2%)
+cargo run --release -- --calibrate
+
+# Calibration under drift — probing too costly (3 goals, cal=49.9%)
+cargo run --release -- --calibrate --drift --recency-rules
+
+# Calibration with slower drift — still worse than greedy (1 goal)
+cargo run --release -- --calibrate --drift --drift-period 50 --recency-rules
+
+# Calibration with noise — overhead reduces goals (869 vs Stage 7's 1095)
+cargo run --release -- --calibrate --noise 0.2 --recency-rules
 ```
 
 **Dependency**: Requires [strand-core](https://github.com/achillesheel02/strand-core) at `../strand-core`.
@@ -1636,7 +1724,7 @@ cargo run --release -- --goal --adaptive --rules --other random --self-model
 ```
 src/
   grid.rs         Grid type + Hamming distance + marker/goal detection + strip_color (state representation)
-  config.rs       M0Config (all tunable parameters, Stages 0–7)
+  config.rs       M0Config (all tunable parameters, Stages 0–8)
   world.rs        MicroWorld (deterministic, stochastic, drifting, multi-agent, or goal-directed grid environment)
   memory.rs       ExperienceMemory (flat Vec, dedup, exact + approximate retrieval, confidence)
   self_model.rs   SelfMemory (factored memory that strips other-agent markers, Stage 5)
@@ -1644,13 +1732,13 @@ src/
   rules.rs        RuleSet (symbolic movement rules, generative prediction, Stage 3)
   planner.rs      BFS planner + greedy baseline (model-based goal-directed planning, Stage 6)
   other.rs        OtherAgent + OtherPolicy (5 fixed-policy behaviours, Stage 4)
-  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, planning interface, adaptive strategy, curiosity-weighted softmax)
-  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model + goal + strategy diagnosis)
-  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model + planning + adaptive strategy)
+  agent.rs        Stage0Agent (seven-way prediction, theory of mind, best-path selector, planning interface, adaptive strategy + active calibration, curiosity-weighted softmax)
+  metrics.rs      Instrumentation (25+ metrics + strand checkpoints + rule + other + self-model + goal + strategy + calibration diagnosis)
+  main.rs         CLI runner (the loop with history buffer + rule extraction + other-agent tracking + self-model + planning + adaptive strategy + calibration)
   lib.rs          Module exports
 ```
 
-~4800 lines of Rust. 112 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
+~5000 lines of Rust. 114 tests. Compiles in <5 seconds. Runs 5000 episodes in <100ms. No neural networks. No LLM. No external dependencies beyond strand-core, serde, and rand.
 
 ## Theoretical Context
 
@@ -1666,6 +1754,7 @@ This experiment tests the first stage of a curriculum for building a CIF-based c
 | **5** | Self/other separation improves predictions | Reflexive | Factored self-memory + best-path selector | **DONE** — acc_S=1.000, Xi_self=+0.758, 19x compression |
 | **6** | Model enables goal-directed navigation | Goal-directed | BFS planner over model rollouts | **DONE** — 1490 goals, efficiency=0.980, rules essential |
 | **7** | Agent monitors and adapts strategy | Drifting goal-directed | Adaptive strategy + position-gated confidence | **DONE** — 24 goals under drift (8x forced plan), 1159 goals with noise |
+| **8** | Agent actively repairs its model | Adversarial dynamics | Calibration probes + cooldown + adaptive | **DONE** — mechanism sound (1481 clean), repair cost exceeds benefit on simple grids |
 
 Stage 0 answered: *can M_0 bootstrap at all?* Yes, in a deterministic environment.
 
@@ -1682,6 +1771,8 @@ Stage 5 answered: *can M_0 improve its own predictions by factoring out what it 
 Stage 6 answered: *can M_0 USE its model to navigate toward a goal?* Yes — with a critical caveat. On a simple 5x5 grid, the BFS planner using rules as its simulator achieves 1490 goals at 0.980 efficiency, matching the greedy baseline. But the planner FAILS under drift (3 goals, efficiency 0.048 — worse than greedy's 10) because rules are corrupted by drift phase mixing, and planning amplifies model error across the rollout horizon. Without rules, planning is almost useless (2 goals) because memory can't predict unseen states — proving that symbolic compression (Stage 3) is a prerequisite for imagination. The key insights: **compression enables imagination** (rules let the agent simulate hypothetical futures that memory cannot), and **a wrong model is worse than no model** (planning with a 70% accurate model actively misleads because errors compound across planning steps). The layered architecture composes cleanly: self-model (Stage 5) + rules (Stage 3) + planner (Stage 6) together handle multi-agent goal-directed navigation at full efficiency.
 
 Stage 7 answered: *can M_0 detect model failure and adapt its strategy?* Yes — by monitoring position-only prediction accuracy and gating planning on model confidence. On a clean grid, the agent plans 98.7% of the time and matches Stage 6 exactly (1490 goals). Under drift, it detects low model confidence and falls back to greedy, achieving 24 goals — 8x the catastrophic 3 goals from Stage 6's forced plan. The key insights: **position-only accuracy is the correct gating signal** (full-grid accuracy is structurally penalized by goal respawns, and intrinsic rule confidence fails to detect wrong-but-consistent rules), **greedy is the correct fallback** (exploration makes no sense when a goal is visible), and **retrospective rule extraction can't outrun drift** (recency buffers always lag the current phase, so the adaptive strategy compensates by detecting and falling back rather than trying to fix the rules). The meta-prediction gate — knowing WHEN to trust the model — is the first demonstration of D7 in the bootstrap sequence.
+
+Stage 8 answered: *can M_0 actively repair its model when it detects failure?* Yes — the mechanism works (on a clean grid, only 2 calibration cycles out of 4900 episodes, 1481 goals). But under adversarial conditions (drift, noise), the repair cost exceeds the benefit. Each calibration cycle spends `n_actions` episodes taking probe actions that move the agent in arbitrary directions, away from the goal. On an obstacle-free 5x5 grid, greedy is always the cheaper fallback: it always progresses toward the goal, while calibration trades navigation progress for model quality that doesn't confer enough planning advantage to recoup the cost. The key insight: **knowing HOW to repair a model is not the same as knowing WHEN repair is cost-effective.** Stage 7 showed D7 (meta-prediction: the agent predicts its own prediction quality). Stage 8 shows that D7 must also evaluate remediation strategies: the cost of fixing the model vs the cost of working around the broken model. On this simple environment, working around it (greedy fallback) always wins. The interesting question for future work: what environment complexity would tip the balance toward active calibration?
 
 ## License
 

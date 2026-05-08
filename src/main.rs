@@ -21,7 +21,9 @@ use std::collections::VecDeque;
 fn main() {
     let config = parse_args();
 
-    let stage = if config.adaptive_strategy {
+    let stage = if config.calibration_enabled {
+        "Stage 8 — Active Calibration"
+    } else if config.adaptive_strategy {
         "Stage 7 — Online Adaptation"
     } else if config.goal_enabled {
         "Stage 6 — Goal-Directed Planning"
@@ -68,6 +70,9 @@ fn main() {
         println!("Adaptive: enabled | Confidence gate: {:.2} | Recency rules: {} | Recency window: {}",
             config.confidence_gate, config.recency_rules, config.recency_window);
     }
+    if config.calibration_enabled {
+        println!("Calibration: enabled");
+    }
     println!();
 
     let mut world = if config.goal_enabled {
@@ -92,7 +97,7 @@ fn main() {
         let state = world.observe();
         let context: Vec<(u8, Grid)> = history.iter().cloned().collect();
 
-        // Stage 7: adaptive strategy selection (after warmup)
+        // Stage 7/8: adaptive strategy selection (after warmup)
         let action = if episode >= config.warmup_episodes && config.adaptive_strategy && config.goal_enabled {
             let strategy = agent.select_strategy();
             match strategy {
@@ -115,6 +120,14 @@ fn main() {
                 Strategy::Explore => {
                     agent.explore_count += 1;
                     agent.select_action(&state, &context)
+                }
+                Strategy::Calibrate(probe_action) => {
+                    // Stage 8: start calibration if this is action 0
+                    if probe_action == 0 && !agent.is_calibrating() {
+                        agent.start_calibration();
+                    }
+                    agent.calibrate_count += 1;
+                    probe_action
                 }
             }
         } else if episode >= config.warmup_episodes && config.plan_enabled && config.goal_enabled {
@@ -183,6 +196,15 @@ fn main() {
         // Stage 7: push to recency buffer (before record consumes state)
         if config.recency_rules {
             agent.push_recency(action, state.clone(), actual.clone());
+        }
+
+        // Stage 8: record calibration probe (before record consumes state)
+        if agent.is_calibrating() {
+            agent.record_calibration_probe(action, state.clone(), actual.clone());
+        }
+        // Stage 8: tick calibration cooldown each episode
+        if config.calibration_enabled {
+            agent.tick_cooldown();
         }
 
         // Record experience
@@ -377,6 +399,12 @@ fn parse_args() -> M0Config {
                     config.confidence_gate = val.parse().unwrap_or(config.confidence_gate);
                 }
             }
+            "--calibrate" => {
+                config.calibration_enabled = true;
+                config.adaptive_strategy = true; // calibrate implies adaptive
+                config.goal_enabled = true;      // adaptive implies goal
+                config.rules_enabled = true;     // adaptive implies rules
+            }
             "--help" | "-h" => {
                 println!("Usage: cif-stage0 [OPTIONS]");
                 println!();
@@ -409,6 +437,7 @@ fn parse_args() -> M0Config {
                 println!("  --recency-rules   Extract rules from recent experience only (Stage 7, implies --rules)");
                 println!("  --recency-window N  Recency buffer size (default: 40)");
                 println!("  --confidence-gate F Minimum model accuracy to use planner (default: 0.8)");
+                println!("  --calibrate       Enable active calibration probes (Stage 8, implies --adaptive)");
                 std::process::exit(0);
             }
             _ => {}

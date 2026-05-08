@@ -27,6 +27,8 @@ pub enum Strategy {
     Plan,
     Greedy,
     Explore,
+    /// Active calibration: take a specific action to probe current dynamics (Stage 8).
+    Calibrate(u8),
 }
 
 pub struct Stage0Agent {
@@ -71,6 +73,16 @@ pub struct Stage0Agent {
     pub plan_count: u64,
     pub greedy_count: u64,
     pub explore_count: u64,
+    /// Calibration state (Stage 8): next action to probe (0..n_actions), or None if not calibrating.
+    calibration_step: Option<u8>,
+    /// Buffer for calibration probes: (action, state_before, state_after).
+    calibration_probes: Vec<(u8, Grid, Grid)>,
+    /// Total calibration episodes spent.
+    pub calibrate_count: u64,
+    /// Number of completed calibration cycles.
+    pub calibration_cycles: u64,
+    /// Cooldown: episodes remaining before next calibration is allowed.
+    calibration_cooldown: u64,
 }
 
 impl Stage0Agent {
@@ -111,6 +123,11 @@ impl Stage0Agent {
             plan_count: 0,
             greedy_count: 0,
             explore_count: 0,
+            calibration_step: None,
+            calibration_probes: Vec::with_capacity(4),
+            calibrate_count: 0,
+            calibration_cycles: 0,
+            calibration_cooldown: 0,
         }
     }
 
@@ -704,9 +721,14 @@ impl Stage0Agent {
     /// Select strategy based on model confidence.
     /// Uses position-only rule accuracy — correctly detects model failure under
     /// drift without being penalized by goal respawns.
-    /// Greedy is always available as fallback when a goal exists (it only needs
-    /// the goal position, not an accurate world model).
+    /// With calibration enabled (Stage 8): when model degrades, probe all 4 actions
+    /// to re-learn current dynamics before falling back to greedy.
     pub fn select_strategy(&self) -> Strategy {
+        // Stage 8: if mid-calibration, continue the probe sequence
+        if let Some(step) = self.calibration_step {
+            return Strategy::Calibrate(step);
+        }
+
         let model_conf = if self.config.rules_enabled && self.rule_set.rule_count() > 0 {
             self.rule_pos_accuracy()
         } else {
@@ -715,15 +737,61 @@ impl Stage0Agent {
 
         if model_conf >= self.config.confidence_gate {
             Strategy::Plan
+        } else if self.calibration_cycles > 0 && self.rule_pos_hits.len() < self.config.n_actions {
+            // Just finished calibration — trust fresh rules before rolling window fills
+            Strategy::Plan
+        } else if self.config.calibration_enabled && self.rule_set.rule_count() > 0 && self.calibration_cooldown == 0 {
+            // Stage 8: model degraded and cooldown expired — start calibration probe
+            Strategy::Calibrate(0)
         } else {
-            // Greedy only needs the goal position — no model required
             Strategy::Greedy
         }
     }
 
+    // ── Stage 8: Active Calibration ─────────────────────────────────────
+
+    /// Begin a calibration cycle: probe action 0.
+    pub fn start_calibration(&mut self) {
+        self.calibration_step = Some(0);
+        self.calibration_probes.clear();
+    }
+
+    /// Record a calibration probe result and advance to next action.
+    /// Probes 1 round of all actions (4 probes on a 4-action grid) to capture
+    /// current dynamics. When complete, re-extract rules, set cooldown, and exit.
+    pub fn record_calibration_probe(&mut self, action: u8, state_before: Grid, state_after: Grid) {
+        self.calibration_probes.push((action, state_before, state_after));
+        let probes_needed = self.config.n_actions;
+        if self.calibration_probes.len() >= probes_needed {
+            // All probes done — re-extract rules from calibration data
+            self.rule_set.extract_from_raw(&self.calibration_probes, self.config.world_size);
+            self.calibration_step = None;
+            self.calibration_cycles += 1;
+            // Clear rolling window so fresh rules aren't judged by old data
+            self.rule_pos_hits.clear();
+            // Cooldown: don't recalibrate for n_actions episodes (let greedy handle transitions)
+            self.calibration_cooldown = self.config.n_actions as u64;
+        } else {
+            let next = ((action + 1) % self.config.n_actions as u8) as u8;
+            self.calibration_step = Some(next);
+        }
+    }
+
+    /// Tick calibration cooldown (call once per episode from main loop).
+    pub fn tick_cooldown(&mut self) {
+        if self.calibration_cooldown > 0 {
+            self.calibration_cooldown -= 1;
+        }
+    }
+
+    /// Whether the agent is currently in a calibration cycle.
+    pub fn is_calibrating(&self) -> bool {
+        self.calibration_step.is_some()
+    }
+
     /// Strategy selection counters for metrics.
-    pub fn strategy_counts(&self) -> (u64, u64, u64) {
-        (self.plan_count, self.greedy_count, self.explore_count)
+    pub fn strategy_counts(&self) -> (u64, u64, u64, u64) {
+        (self.plan_count, self.greedy_count, self.explore_count, self.calibrate_count)
     }
 
     /// Average prediction confidence across unique (action, state_before) pairs.
@@ -1234,5 +1302,86 @@ mod tests {
         }
         // Buffer should be capped at 5
         assert_eq!(agent.recency_buffer.len(), 5);
+    }
+
+    // ── Stage 8 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_calibration_cycle_completes() {
+        let config = M0Config {
+            calibration_enabled: true,
+            rules_enabled: true,
+            warmup_episodes: 0,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+
+        // Create grids with actual agent markers (value 1)
+        let mut before = Grid::filled(5, 5, 0);
+        before.set(2, 2, 1); // agent at center
+        let mut after = Grid::filled(5, 5, 0);
+        after.set(1, 2, 1); // agent moved up
+
+        // Build rules from a proper state transition
+        agent.rule_set.extract_from_raw(&[(0, before.clone(), after.clone())], 5);
+        assert!(agent.rule_set.rule_count() > 0);
+
+        // Trigger calibration by feeding low-confidence data
+        for _ in 0..20 {
+            agent.record_rule_pos_hit(false);
+        }
+        assert_eq!(agent.select_strategy(), Strategy::Calibrate(0));
+
+        // Start and run calibration cycle (4 probes for 4 actions)
+        agent.start_calibration();
+        assert!(agent.is_calibrating());
+        for action in 0..4u8 {
+            agent.record_calibration_probe(action, before.clone(), after.clone());
+        }
+        // Calibration should be done
+        assert!(!agent.is_calibrating());
+        assert_eq!(agent.calibration_cycles, 1);
+    }
+
+    #[test]
+    fn test_calibration_cooldown_prevents_immediate_recalibration() {
+        let config = M0Config {
+            calibration_enabled: true,
+            rules_enabled: true,
+            warmup_episodes: 0,
+            n_actions: 4,
+            ..M0Config::default()
+        };
+        let mut agent = Stage0Agent::new(config);
+
+        // Create grids with actual agent markers
+        let mut before = Grid::filled(5, 5, 0);
+        before.set(2, 2, 1);
+        let mut after = Grid::filled(5, 5, 0);
+        after.set(1, 2, 1);
+
+        // Build rules and complete one calibration cycle
+        agent.rule_set.extract_from_raw(&[(0, before.clone(), after.clone())], 5);
+        agent.start_calibration();
+        for action in 0..4u8 {
+            agent.record_calibration_probe(action, before.clone(), after.clone());
+        }
+        assert_eq!(agent.calibration_cycles, 1);
+
+        // Feed enough bad data to fill the rolling window past n_actions
+        for _ in 0..10 {
+            agent.record_rule_pos_hit(false);
+        }
+
+        // Cooldown should block recalibration — expect Greedy not Calibrate
+        assert_eq!(agent.select_strategy(), Strategy::Greedy);
+
+        // Tick down the cooldown (n_actions = 4 ticks)
+        for _ in 0..4 {
+            agent.tick_cooldown();
+        }
+
+        // Now cooldown expired — should allow recalibration
+        assert_eq!(agent.select_strategy(), Strategy::Calibrate(0));
     }
 }

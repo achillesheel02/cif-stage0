@@ -71,6 +71,8 @@ pub struct M0Config {
     pub recency_window: usize,
     /// Minimum model accuracy to use planner (Stage 7).
     pub confidence_gate: f64,
+    /// Enable active calibration when model degrades (Stage 8).
+    pub calibration_enabled: bool,
 }
 
 impl Default for M0Config {
@@ -108,6 +110,7 @@ impl Default for M0Config {
             recency_rules: false,
             recency_window: 40,
             confidence_gate: 0.8,
+            calibration_enabled: false,
         }
     }
 }

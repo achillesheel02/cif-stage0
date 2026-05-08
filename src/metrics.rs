@@ -101,7 +101,14 @@ impl Metrics {
         };
 
         if !self.header_printed {
-            if agent.config.adaptive_strategy {
+            if agent.config.calibration_enabled {
+                println!(
+                    "{:<8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>6} {:>8} {:>10}",
+                    "episode", "goals", "effic", "acc_R", "acc_A", "plan%", "grdy%", "cal%",
+                    "cyc", "entropy", "gap"
+                );
+                println!("{}", "-".repeat(110));
+            } else if agent.config.adaptive_strategy {
                 println!(
                     "{:<8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10}",
                     "episode", "goals", "effic", "acc_R", "acc_A", "plan%", "greedy%", "expl%",
@@ -162,9 +169,26 @@ impl Metrics {
             .map(|sc| (format!("{:.3}", sc.frobenius), sc.gap_class.clone()))
             .unwrap_or_else(|| ("-".into(), "-".into()));
 
-        if agent.config.adaptive_strategy {
-            let (pc, gc, ec) = agent.strategy_counts();
-            let total = (pc + gc + ec).max(1) as f64;
+        if agent.config.calibration_enabled {
+            let (pc, gc, _ec, cc) = agent.strategy_counts();
+            let total = (pc + gc + cc).max(1) as f64;
+            println!(
+                "{:<8} {:>6} {:>8.3} {:>8.3} {:>8.3} {:>7.1}% {:>7.1}% {:>7.1}% {:>6} {:>8.3} {:>10}",
+                snap.episode,
+                snap.goals_reached,
+                snap.navigation_efficiency,
+                snap.accuracy_r,
+                snap.accuracy,
+                100.0 * pc as f64 / total,
+                100.0 * gc as f64 / total,
+                100.0 * cc as f64 / total,
+                agent.calibration_cycles,
+                snap.entropy,
+                gap_str,
+            );
+        } else if agent.config.adaptive_strategy {
+            let (pc, gc, ec, cc) = agent.strategy_counts();
+            let total = (pc + gc + ec + cc).max(1) as f64;
             println!(
                 "{:<8} {:>6} {:>8.3} {:>8.3} {:>8.3} {:>7.1}% {:>7.1}% {:>7.1}% {:>8.3} {:>8.3} {:>10}",
                 snap.episode,
@@ -640,22 +664,44 @@ impl Metrics {
             }
         }
 
-        // Adaptive strategy diagnosis (Stage 7)
+        // Adaptive strategy diagnosis (Stage 7/8)
         if agent.config.adaptive_strategy {
-            let (pc, gc, ec) = agent.strategy_counts();
-            let total = (pc + gc + ec).max(1) as f64;
-            println!(
-                "Strategy: plan={:.1}% greedy={:.1}% explore={:.1}% (gate={:.2}, model_conf={:.3})",
-                100.0 * pc as f64 / total,
-                100.0 * gc as f64 / total,
-                100.0 * ec as f64 / total,
-                agent.config.confidence_gate,
-                agent.rule_pos_accuracy(),
-            );
+            let (pc, gc, ec, cc) = agent.strategy_counts();
+            let total = (pc + gc + ec + cc).max(1) as f64;
+            if agent.config.calibration_enabled {
+                println!(
+                    "Strategy: plan={:.1}% greedy={:.1}% calibrate={:.1}% (gate={:.2}, model_conf={:.3})",
+                    100.0 * pc as f64 / total,
+                    100.0 * gc as f64 / total,
+                    100.0 * cc as f64 / total,
+                    agent.config.confidence_gate,
+                    agent.rule_pos_accuracy(),
+                );
+                println!(
+                    "Calibration cycles: {} ({} episodes spent probing)",
+                    agent.calibration_cycles, cc
+                );
+            } else {
+                println!(
+                    "Strategy: plan={:.1}% greedy={:.1}% explore={:.1}% (gate={:.2}, model_conf={:.3})",
+                    100.0 * pc as f64 / total,
+                    100.0 * gc as f64 / total,
+                    100.0 * ec as f64 / total,
+                    agent.config.confidence_gate,
+                    agent.rule_pos_accuracy(),
+                );
+            }
             if pc as f64 / total > 0.8 {
                 println!("  MODEL CONFIDENT — planning dominates ({:.1}%), model accuracy sufficient.", 100.0 * pc as f64 / total);
             } else if gc as f64 / total > 0.5 {
                 println!("  MODEL UNCERTAIN — greedy fallback dominates ({:.1}%), model below confidence gate.", 100.0 * gc as f64 / total);
+            }
+            if cc > 0 {
+                let plan_pct = 100.0 * pc as f64 / total;
+                let cal_pct = 100.0 * cc as f64 / total;
+                if plan_pct > 50.0 && cal_pct > 0.0 {
+                    println!("  ACTIVE CALIBRATION — {} cycles, agent probes to repair model, plans when confident.", agent.calibration_cycles);
+                }
             }
         }
         if agent.config.recency_rules {
